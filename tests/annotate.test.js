@@ -408,6 +408,40 @@ test("不修改任何既有元素的 class（避免触发其它歌词插件的�
   assert.ok(ctx.document.querySelector("[data-kt-region]"), "标记应该落在 data 属性上");
 });
 
+test("隐藏的歌词副本不标注（换歌时上一首残留的容器）", () => {
+  // 换歌时上一首的歌词容器、以及 RefinedNowPlaying 的淡出副本会短暂留在 DOM 里。
+  // 如果照样注音，换歌过程中就会同时看到上一首和当前歌词，而且两个容器
+  // 被 React 来回重建、我们来回重注，表现就是抽搐。
+  const ctx = loadCore(`<!doctype html><html><body>
+    <div class="old" style="display:none">
+      <ul class="lyric"><li><p>コーヒーを飲みながら</p></li></ul>
+    </div>
+    <div class="cur">
+      <ul class="lyric"><li><p>ギターを弾く</p></li></ul>
+    </div>
+  </body></html>`);
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+
+  const regions = ann.findRegions("lyrics");
+  for (const r of regions) {
+    assert.strictEqual(r.closest(".old"), null, "隐藏副本里的容器不该被选中");
+  }
+
+  ann.pass();
+  const hidden = ctx.document.querySelector(".old");
+  assert.strictEqual(hidden.querySelectorAll("ruby.kt-ruby").length, 0, "隐藏副本不该被注音");
+  assert.strictEqual(hidden.textContent.replace(/\s+/g, ""), "コーヒーを飲みながら", "隐藏副本保持原样");
+  assert.strictEqual(ctx.document.querySelectorAll(".cur ruby.kt-ruby").length, 1, "当前歌词应该被注音");
+
+  // 多轮稳定
+  for (let i = 0; i < 3; i++) {
+    const r = ann.pass();
+    assert.strictEqual(r.changed, 0, "稳定后不该再改");
+    assert.strictEqual(r.restored, 0, "隐藏行不该被反复还原");
+  }
+});
+
 test("文本节点里既有词又有普通文本时，拼接顺序不乱", () => {
   const html = `<!doctype html><html><body><ul class="lyric"><li><p>これはコーヒーです</p></li></ul></body></html>`;
   const ctx = loadCore(html);

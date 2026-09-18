@@ -468,6 +468,41 @@
     }
 
     /**
+     * 元素当前是否可见。
+     *
+     * 为什么必须判：换歌时上一首的歌词容器（以及 RefinedNowPlaying 的淡出副本）
+     * 还会在 DOM 里挂一会儿。如果照样给它注音，换歌过程中就会看到
+     * 「上一首的歌词」和正在播放的歌词同时出现，而且两个容器来回被 React
+     * 重建、我们也来回重注，表现就是一直抽搐。只处理可见的容器即可。
+     *
+     * 判定从严：只有「明确隐藏」才排除。
+     * - 行内 style 的 display:none / visibility:hidden、hidden 属性：一定可信；
+     * - getComputedStyle 拿不到有效值时（jsdom 之类）一律当可见，
+     *   不能因为环境测不出来就把正常内容漏掉。
+     */
+    function isVisible(el) {
+      if (!el || el.nodeType !== 1) return false;
+      for (var p = el; p && p !== doc.body; p = p.parentElement) {
+        if (p.hidden === true) return false;
+        var inline = p.style;
+        if (inline) {
+          if (inline.display === "none") return false;
+          if (inline.visibility === "hidden" || inline.visibility === "collapse") return false;
+        }
+        var s;
+        try {
+          s = getComputedStyle(p);
+        } catch (e) {
+          continue; // 拿不到样式就当可见
+        }
+        if (!s || !s.display) continue;
+        if (s.display === "none") return false;
+        if (s.visibility === "hidden" || s.visibility === "collapse") return false;
+      }
+      return true;
+    }
+
+    /**
      * 按一组选择器收集元素，去掉互相包含的重复项。
      * 选择器写错不会抛异常（用户自定义选择器可能非法）。
      */
@@ -484,6 +519,7 @@
         for (var j = 0; j < found.length; j++) {
           var el = found[j];
           if (!el.isConnected) continue;
+          if (!isVisible(el)) continue; // 隐藏的副本（换歌残留）不碰
           var covered = false;
           for (var s = 0; s < seen.length; s++) {
             if (seen[s].contains(el)) {
@@ -538,18 +574,8 @@
     function pass(regions) {
       if (!doc || !doc.body) return { scanned: 0, changed: 0, restored: 0 };
 
-      // 先把 React 已经重建掉的记录清掉
+      // 只清掉宿主已经脱离文档的记录（那块 DOM 已经没了）
       var restored = dropDetached();
-
-      // 注音被 React 摘掉/挪走的，先还原回纯文本，再重新处理
-      var stale = [];
-      records.forEach(function (rec, node) {
-        if (isStale(rec, node)) stale.push(node);
-      });
-      for (var si = 0; si < stale.length; si++) {
-        restoreRecord(stale[si], records.get(stale[si]));
-        restored++;
-      }
 
       var list = regions && regions.length ? regions : findRegions("safe");
       if (!list.length) return { scanned: 0, changed: 0, restored: restored };
@@ -566,7 +592,6 @@
       var changed = 0;
       for (var i = 0; i < candidates.length; i++) {
         var node = candidates[i];
-        if (records.has(node)) continue; // 已经是注音版了
         // 所属区域：可能是被包含的子区域，取文档顺序里第一个包含它的
         var region = list[0];
         for (var ri = 0; ri < list.length; ri++) {
@@ -575,12 +600,14 @@
             break;
           }
         }
-        if (!region.isConnected) continue;
+        if (!region.isConnected || !isVisible(region)) continue;
 
-        // 注音被摘掉/文本被 React 改过的，先还原成纯文本再重做
+        // 已经注过音的行：只有确认失效了才动它。
+        // 注意这里不能直接跳过 —— 上一版把「失效重做」放在循环外统一处理，
+        // 结果所有历史记录每轮都被还原一次（包括已经隐藏、根本不用管的行）。
         var rec = records.get(node);
         if (rec) {
-          if (!isStale(rec, node)) continue; // 依然有效，别动它
+          if (!isStale(rec, node)) continue; // 依然有效，一个字节都不动
           restoreRecord(node, rec);
           restored++;
         }
@@ -598,6 +625,17 @@
             // 我们的注音跟着被丢掉、下一轮再标 —— 来回就是抽搐。
             if (region.setAttribute && !region.hasAttribute("data-kt-region")) {
               region.setAttribute("data-kt-region", "1");
+              // 记录改了哪个元素：同一行反复出现在这里就说明没收敛
+              if (options.log) {
+                options.log(
+                  "标记区域 " +
+                    (region.tagName || "?") +
+                    "." +
+                    String(region.className || "").split(" ").slice(0, 2).join(".") +
+                    " 文本=" +
+                    JSON.stringify(String(region.textContent || "").slice(0, 24))
+                );
+              }
             }
           }
         } catch (e) {
