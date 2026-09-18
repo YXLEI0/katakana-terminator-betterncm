@@ -78,6 +78,31 @@ console.log("[0/7] 运行时版本");
   } catch (e) {
     warn("没找到 undici（jsdom 的依赖）");
   }
+
+  // 测试文件清单：npm test 里显式列了这几个文件。
+  // 不要退回 `node --test tests/`（Node 22 会把目录当模块名，
+  // 报 Cannot find module .../tests），也不要用 glob（不同 Node 版本
+  // 对 --test 的 glob 支持不一致）。加了新测试文件却忘了写进 package.json
+  // 的话，这里会提醒。
+  const TEST_FILES = [
+    "tests/matcher.test.js",
+    "tests/annotate.test.js",
+    "tests/translate.test.js",
+    "tests/integration.test.js",
+  ];
+  const missing = TEST_FILES.filter((f) => !fs.existsSync(path.join(ROOT, f)));
+  if (missing.length) fail("测试文件不存在：" + missing.join(", "));
+  const onDisk = fs
+    .readdirSync(path.join(ROOT, "tests"))
+    .filter((f) => f.endsWith(".test.js"))
+    .map((f) => "tests/" + f);
+  const notListed = onDisk.filter((f) => !TEST_FILES.includes(f));
+  if (notListed.length) warn("tests/ 下有没被 npm test 覆盖的测试文件：" + notListed.join(", "));
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+  for (const f of TEST_FILES) {
+    if (!pkg.scripts.test.includes(f)) fail(`npm test 里没有包含 ${f}`);
+  }
+  if (!missing.length && !notListed.length) ok(`npm test 覆盖全部 ${TEST_FILES.length} 个测试文件`);
 }
 
 // ---------------------------------------------------------------- 1. 语法

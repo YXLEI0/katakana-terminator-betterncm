@@ -9,7 +9,7 @@
     "build:dict": "node tools/build-dict.js",
     "build:preview": "node tools/make-preview.js",
     "install:plugin": "node tools/build.js --install",
-    "test": "node --test tests/",
+    "test": "node --test tests/matcher.test.js tests/annotate.test.js tests/translate.test.js tests/integration.test.js",
     "test:serial": "node tests/matcher.test.js && node tests/annotate.test.js && node tests/translate.test.js && node tests/integration.test.js",
     "check": "node tools/check.js"
   },
