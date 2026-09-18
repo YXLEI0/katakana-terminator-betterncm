@@ -37,6 +37,20 @@ function okResponse(words, map) {
   };
 }
 
+/**
+ * gtx（/translate_a/single）的响应形状：
+ *   [[["译文","原文",null,null,...], ...]]
+ * 把每个词当成一条句子返回，原文里带上换行，和真接口的行为一致。
+ */
+function gtxResponse(words, map) {
+  const chunks = words.map((w, i) => [map[w] !== undefined ? map[w] : w, i < words.length - 1 ? w + "\n" : w, null, null, 3]);
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve([chunks]),
+  };
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("离线词典能直接命中（同步、不发请求）", () => {
@@ -74,7 +88,6 @@ test("词典里没有的词会排队，拿回结果后能查到", async () => {
   assert.match(calls[0], /sl=ja/);
   assert.match(calls[0], /tl=en/);
 });
-
 test("同一批里的重复词只查一次", async () => {
   const ctx = loadCore();
   const calls = installFakeFetch(ctx, (u) => okResponse(wordsOf(u), { アレコレ: "this and that" }));
@@ -112,14 +125,15 @@ test("接口失败时不影响词典，也不无限重试", async () => {
 
   assert.strictEqual(t.lookup("コーヒー"), "coffee", "在线挂了，词典仍要能用");
   t.lookup("ズンドコ");
-  // 两个 host 各试一次，然后就该记下失败、不再纠缠
+  // 每个候选接口各试一次，然后就该记下失败、不再纠缠
+  const endpointCount = ctx.KTTranslate.ENDPOINTS.length;
   await sleep(5000);
   const s = t.stats();
   assert.ok(s.failures >= 1, "应该记录了失败");
   assert.ok(s.lastError, "应该记录最后一次错误");
   assert.strictEqual(t.lookup("ズンドコ"), null);
   const afterFailure = calls.length;
-  assert.strictEqual(afterFailure, 2, `失败后应该刚好试完两个 host，实际 ${afterFailure} 次`);
+  assert.strictEqual(afterFailure, endpointCount, `失败后应该试完全部 ${endpointCount} 个接口，实际 ${afterFailure} 次`);
   // 关键：反复 lookup 不应该再触发任何请求，否则页面一刷新就是请求风暴
   t.lookup("ズンドコ");
   t.lookup("ズンドコ");
@@ -127,20 +141,38 @@ test("接口失败时不影响词典，也不无限重试", async () => {
   assert.strictEqual(calls.length, afterFailure, "失败过的词不应该每次查询都重发请求");
 });
 
-test("第一个 host 失败后换第二个 host 重试", async () => {
+test("第一个接口失败后换下一个接口重试", async () => {
   const ctx = loadCore();
   const calls = installFakeFetch(ctx, (url) => {
-    if (String(url).includes("translate.google.cn")) {
+    // 前两个 dict 接口都挂掉，第三个 gtx 接口成功
+    if (String(url).includes("/translate_a/t?")) {
       return { ok: false, status: 429, json: () => Promise.resolve({}) };
     }
-    return okResponse(wordsOf(url), { ズンドコ: "zundoko" });
+    return gtxResponse(wordsOf(url), { ズンドコ: "zundoko" });
   });
   const t = ctx.KTTranslate.createTranslator({ online: true });
   t.lookup("ズンドコ");
   await sleep(1600);
-  assert.strictEqual(t.lookup("ズンドコ"), "zundoko", "换 host 之后应该成功");
-  assert.ok(calls.some((u) => u.includes("translate.google.cn")));
-  assert.ok(calls.some((u) => u.includes("translate.google.com")));
+  assert.strictEqual(t.lookup("ズンドコ"), "zundoko", "换接口之后应该成功");
+  assert.ok(calls.some((u) => u.includes("/translate_a/t?")), "应该先试过 dict 接口");
+  assert.ok(calls.some((u) => u.includes("/translate_a/single")), "应该试过 gtx 接口");
+});
+
+test("gtx 接口的响应形状也能正确解析（每行一条句子）", async () => {
+  const ctx = loadCore();
+  const calls = installFakeFetch(ctx, (url) => {
+    if (String(url).includes("/translate_a/t?")) {
+      return { ok: false, status: 429, json: () => Promise.resolve({}) };
+    }
+    return gtxResponse(wordsOf(url), { ズンドコ: "zundoko", パラダイス: "paradise" });
+  });
+  const t = ctx.KTTranslate.createTranslator({ online: true });
+  t.lookup("ズンドコ");
+  t.lookup("パラダイス");
+  await sleep(1600);
+  assert.strictEqual(t.lookup("ズンドコ"), "zundoko");
+  assert.strictEqual(t.lookup("パラダイス"), "paradise");
+  assert.ok(calls.some((u) => u.includes("/translate_a/single")));
 });
 
 test("响应行数对不上时按失败处理（不会错位贴注音）", async () => {

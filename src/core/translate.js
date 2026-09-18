@@ -40,16 +40,23 @@
   var FLUSH_DELAY_MS = 1200; // 攒批窗口
   var BATCH_SIZE = 50;
   var REQUEST_TIMEOUT_MS = 12000;
-  var MAX_ATTEMPTS = 2;
 
   /*
-   * 依次尝试的接口。都用同一个路径形状，只是换 host：
-   *   /translate_a/t?client=dict-chrome-ex&dt=t&sl=ja&tl=en&q=...
-   * 返回 ["行1\n行2\n..."]，按 \n 拆开与请求顺序一一对应。
-   * 实测（2026-02）translate.google.cn 最快；googleapis 的 gtx 接口会被限流，
-   * 所以不作为首选。
+   * 依次尝试的接口。全部是 Google 翻译的前端接口，换 host / 换响应形状而已：
+   *
+   *   a) dict-chrome-ex  -> /translate_a/t        返回 ["行1\n行2\n..."]，最好解析
+   *   b) gtx（single）   -> /translate_a/single   返回 [[["译文","原文",...],...]]，需拼句
+   *
+   * 为什么要两个形状：某些网络环境下 translate.google.cn 被 hosts 改写或者被限流，
+   * 换 host、换接口经常能绕过；gtx 那条路径在部分节点上比 dict-chrome-ex 更稳。
+   * 实测（2026-02）：translate.google.cn 的 dict-chrome-ex 最快，所以排第一。
    */
-  var HOSTS = ["translate.google.cn", "translate.google.com"];
+  var ENDPOINTS = [
+    { label: "google.cn/dict", host: "translate.google.cn", kind: "dict" },
+    { label: "google.com/dict", host: "translate.google.com", kind: "dict" },
+    { label: "googleapis/gtx", host: "translate.googleapis.com", kind: "gtx" },
+    { label: "google.cn/gtx", host: "translate.google.cn", kind: "gtx" },
+  ];
 
   function createTranslator(options) {
     options = options || {};
@@ -252,21 +259,65 @@
       );
     }
 
-    function buildUrl(host, words) {
-      return (
-        "https://" +
-        host +
-        "/translate_a/t?client=dict-chrome-ex&dt=t&sl=ja&tl=en&q=" +
-        encodeURIComponent(words.join("\n"))
-      );
+    function buildUrl(endpoint, words) {
+      var q = encodeURIComponent(words.join("\n"));
+      if (endpoint.kind === "gtx") {
+        return (
+          "https://" +
+          endpoint.host +
+          "/translate_a/single?client=gtx&sl=ja&tl=en&dt=t&q=" +
+          q
+        );
+      }
+      return "https://" + endpoint.host + "/translate_a/t?client=dict-chrome-ex&dt=t&sl=ja&tl=en&q=" + q;
     }
 
-    function parseResponse(json, expected) {
+    /**
+     * 解析 dict-chrome-ex 的响应：["行1\n行2\n..."]
+     */
+    function parseDict(json, expected) {
       var joined = Array.isArray(json) && Array.isArray(json[0]) ? json[0][0] : json[0];
       if (typeof joined !== "string") throw new Error("响应形状异常");
       var lines = joined.split("\n");
       if (lines.length !== expected) throw new Error("行数对不上（要 " + expected + " 行，回 " + lines.length + " 行）");
       return lines.map(cleanGloss);
+    }
+
+    /**
+     * 解析 gtx 的响应：[[["译文","原文",...],["译文2","原文2",...]], ...]
+     *
+     * 把 query 按 \n 拆成 N 行发过去，接口会把相邻的短句合并成一条句子返回，
+     * 靠第二项（原文）里有没有换行来分界：
+     *   - 原文里出现 N-1 个换行 -> 每条句子正好对应一行，按顺序产出；
+     *   - 没有换行（短查询被合并成一句）-> 说明它按 \n 原样回，把译文按 \n 拆开。
+     * 最后必须核对行数，对不上就抛错失败换接口 —— 宁可注不上音，
+     * 也不能把 A 词的英文标到 B 词头上。
+     */
+    function parseGtx(json, expected) {
+      if (!Array.isArray(json) || !Array.isArray(json[0])) throw new Error("响应形状异常");
+      var chunks = json[0];
+      var segments = [];
+      var newlines = 0;
+      for (var i = 0; i < chunks.length; i++) {
+        var c = chunks[i];
+        if (!c) continue;
+        segments.push(cleanGloss(c[0]));
+        var src = typeof c[1] === "string" ? c[1] : "";
+        for (var j = 0; j < src.length; j++) if (src[j] === "\n") newlines++;
+      }
+      var out = null;
+      if (newlines >= expected - 1 && segments.length >= expected) {
+        out = segments.slice(0, expected);
+      } else {
+        var split = [];
+        for (var k = 0; k < segments.length; k++) {
+          var parts = segments[k].split("\n");
+          for (var m = 0; m < parts.length; m++) split.push(parts[m]);
+        }
+        if (split.length === expected) out = split;
+      }
+      if (!out) throw new Error("gtx 行数对不上（要 " + expected + " 行）");
+      return out;
     }
 
     function cleanGloss(s) {
@@ -276,12 +327,12 @@
         .replace(/[.。]+$/, "");
     }
 
-    function requestOnce(host, words) {
+    function requestOnce(endpoint, words) {
       var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
       var t = setTimeout(function () {
         if (ctrl) ctrl.abort();
       }, REQUEST_TIMEOUT_MS);
-      return fetch(buildUrl(host, words), {
+      return fetch(buildUrl(endpoint, words), {
         method: "GET",
         headers: { Accept: "application/json" },
         signal: ctrl ? ctrl.signal : undefined,
@@ -291,7 +342,7 @@
           return res.json();
         })
         .then(function (json) {
-          return parseResponse(json, words.length);
+          return endpoint.kind === "gtx" ? parseGtx(json, words.length) : parseDict(json, words.length);
         })
         .finally(function () {
           clearTimeout(t);
@@ -300,11 +351,11 @@
 
     function request(words, attempt) {
       attempt = attempt || 0;
-      var host = HOSTS[Math.min(attempt, HOSTS.length - 1)];
-      return requestOnce(host, words).catch(function (err) {
-        if (attempt + 1 < MAX_ATTEMPTS) {
-          log("接口 " + host + " 失败（" + err.message + "），换一个再试");
-          // 注意参数顺序：这里是 (words, attempt)，别把 host 当成了 words
+      var endpoint = ENDPOINTS[Math.min(attempt, ENDPOINTS.length - 1)];
+      return requestOnce(endpoint, words).catch(function (err) {
+        if (attempt + 1 < ENDPOINTS.length) {
+          log("接口 " + endpoint.label + " 失败（" + err.message + "），换下一个再试");
+          // 注意参数顺序：这里是 (words, attempt)，别把 endpoint 当成了 words
           return request(words, attempt + 1);
         }
         throw err;
@@ -361,5 +412,5 @@
     };
   }
 
-  return { createTranslator: createTranslator, CACHE_KEY: CACHE_KEY, HOSTS: HOSTS };
+  return { createTranslator: createTranslator, CACHE_KEY: CACHE_KEY, ENDPOINTS: ENDPOINTS };
 });

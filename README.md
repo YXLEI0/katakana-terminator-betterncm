@@ -64,7 +64,7 @@ npm run install:plugin              # 顺便复制到 C:\betterncm\plugins
 
 1. **会话缓存**（内存）—— 命中就同步返回；
 2. **离线词典**（[`src/core/dict.js`](src/core/dict.js)，335 条常用外来语）—— 断网也能标；
-3. **在线翻译**（Google 翻译的 `dict-chrome-ex` 接口）—— 前两层没有的词才发请求。
+3. **在线翻译**（Google 翻译的前端接口）—— 前两层没有的词才发请求。
 
 原版扩展**完全依赖在线接口**，接口一挂插件就废了（同类插件 jp-furigana 就因为这个停更过）。
 这里把词典放在在线之前，保证「离线可用、在线更准」。
@@ -72,6 +72,45 @@ npm run install:plugin              # 顺便复制到 C:\betterncm\plugins
 在线部分是非阻塞的：查不到的词先进队列，攒一小会儿（约 1.2 秒）批量请求，一次最多 50 个词。
 同一批里的重复词只发一次；失败过的词会记成「查不到」不再自动重试，避免接口故障时把请求打爆。
 结果缓存在 `localStorage`，30 天过期，最多 4000 条。
+
+在线接口有**四个候选**，按顺序尝试，前一个失败就换下一个（同一个厂商、两种响应形状）：
+
+| 顺序 | 接口 | 形状 |
+| --- | --- | --- |
+| 1 | `translate.google.cn/translate_a/t` | `client=dict-chrome-ex` |
+| 2 | `translate.google.com/translate_a/t` | `client=dict-chrome-ex` |
+| 3 | `translate.googleapis.com/translate_a/single` | `client=gtx` |
+| 4 | `translate.google.cn/translate_a/single` | `client=gtx` |
+
+多候选是有实际意义的：某些网络环境会把这些域名写进 `hosts` 指向 `127.0.0.1`，
+或者对单个接口限流；换域名/换接口往往就能绕过。四个都失败才判定为离线。
+
+> 如果你的网络需要代理才能访问这些接口，请让网易云走系统代理（或在代理软件里开 TUN/透明代理）。
+> 插件自身不读代理设置，走的是客户端进程的网络栈。
+
+## 排障
+
+控制台（BetterNCM 的开发者工具）里有一个 `KT` 对象：
+
+```js
+KT.stats()            // 命中统计、在线请求次数、失败原因、缓存条数
+KT.lookup('コーヒー')  // 单独查一个词，看当前拿到什么译文
+KT.rubyLayout()       // 当前内核认不认 ruby 排版（false 表示走了降级）
+KT.scan('コーヒーとカフェ')   // 看分词结果
+KT.pass()             // 立刻重扫一次
+KT.clearCache()       // 清掉翻译缓存
+KT.set('online', false)  // 临时改成纯离线
+```
+
+`[katakana-terminator]` 开头的日志里，`在线翻译失败：...` 会带上最后一个接口的错误原因。
+接口全部失败时插件会退回离线词典，页面不会出错——只是没词典覆盖的词不标。
+
+想单独验证联网这条路：
+
+```bash
+set HTTPS_PROXY=http://127.0.0.1:7897   # 按你的代理端口改
+node --use-system-ca tools/live-check.js
+```
 
 ## 实现要点
 
@@ -103,6 +142,7 @@ tools/
   build-dict.js       生成离线词典
   make-preview.js     生成预览图
   check.js            静态自检（语法/manifest/词典/密钥）
+  live-check.js       联网自测在线翻译接口
 ```
 
 ## 开发
@@ -112,6 +152,7 @@ npm install
 npm test              # 跑单元测试
 npm run test:serial   # 某些沙箱里 node --test 起不了子进程时用这个
 npm run check         # 静态自检
+node --use-system-ca tools/live-check.js   # 联网自测在线翻译（需要能访问 Google）
 ```
 
 ### 重新生成离线词典
