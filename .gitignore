@@ -1,0 +1,14 @@
+# 依赖与产物
+node_modules/
+builds/
+*.plugin
+
+# 生成词典 / 预览图时的中间文件
+tools/.cache/
+
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.log
