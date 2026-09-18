@@ -1,5 +1,16 @@
 # 更新记录
 
+## 1.0.2
+
+- 修 CI：`actions/setup-node` 从 Node 20 升到 22.22.2。
+  jsdom 30 要求 `^22.22.2 || ^24.15.0 || >=26`，在 Node 20 上它依赖的 undici
+  会崩（`TypeError: webidl.util.markAsUncloneable is not a function`），
+  导致四个测试文件全部 `testCodeFailure`。
+- `package.json` 的 `engines.node` 改为 `>=22.22.2`，并加 `.npmrc`（`engine-strict=true`），
+  让版本不满足时在 `npm install` 阶段就失败，而不是等到跑测试才报一堆看不懂的错。
+- `tools/check.js` 新增「运行时版本」检查项，提前拦这类问题。
+- CI 的测试步骤去掉 `|| npm run test:serial` 兜底 —— 它会把真实失败掩盖成通过。
+
 ## 1.0.1
 
 - 填入维护者信息与仓库地址（`manifest.json` 的 `author` / `author_link`，`main.js` 的 `REPO_URL`），

@@ -147,10 +147,15 @@ tools/
 
 ## 开发
 
+### 开发环境
+
+需要 **Node ≥ 22.22.2**（`jsdom 30` 的引擎要求）。Node 20 上会直接崩，
+报 `webidl.util.markAsUncloneable is not a function`，`npm run check` 会提前把这种情况拦下来。
+
 ```bash
 npm install
-npm test              # 跑单元测试
-npm run test:serial   # 某些沙箱里 node --test 起不了子进程时用这个
+npm test              # 跑单元测试（node --test）
+npm run test:serial   # 逐个文件跑；受限环境里 node --test 起不了子进程时用这个
 npm run check         # 静态自检
 node --use-system-ca tools/live-check.js   # 联网自测在线翻译（需要能访问 Google）
 ```

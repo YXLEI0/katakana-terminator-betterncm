@@ -3,7 +3,7 @@
 	"manifest_version": 1,
 	"name": "片假名终结者",
 	"slug": "katakana-terminator",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"author": "YXLEI0",
 	"author_link": "https://github.com/YXLEI0",
 	"description": "在片假名外来语上方标注英文原词（Katakana Terminator 的网易云移植版）",

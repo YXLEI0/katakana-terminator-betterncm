@@ -4,11 +4,12 @@
  *   node tools/check.js
  *
  * 检查项：
+ *   0. Node 版本满足 jsdom 的引擎要求；
  *   1. 所有 .js 能通过语法解析（vm.Script 只编译不执行）；
  *   2. manifest.json 合法，slug/version 格式正确，注入顺序符合依赖；
  *   3. 注入清单里的文件都存在，且不含别的东西；
  *   4. 词典条目数与格式；
- *   5. 源码里不残留 TODO/OWNER 之类的占位符（提示性，不算失败）；
+ *   5. 元信息一致（REPO_URL 与仓库一致、无 OWNER 占位符）；
  *   6. 不出现明显的秘密信息（token 之类）。
  */
 "use strict";
@@ -47,9 +48,41 @@ function walk(dir, out) {
   return out;
 }
 
+// ---------------------------------------------------------------- 0. 运行时版本
+
+console.log("[0/7] 运行时版本");
+{
+  // jsdom 30 要求 Node ^22.22.2 || ^24.15.0 || >=26。跑低了不会给出清楚的报错，
+  // 而是它依赖的 undici 直接崩：
+  //   TypeError: webidl.util.markAsUncloneable is not a function
+  // CI 里曾经就因为在 Node 20 上跑，四个测试文件全挂，所以这里提前拦一道。
+  const [maj, min, patch] = process.versions.node.split(".").map(Number);
+  const v = [maj, min, patch];
+  const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  const okNode =
+    (maj === 22 && cmp(v, [22, 22, 2]) >= 0) ||
+    (maj === 24 && cmp(v, [24, 15, 0]) >= 0) ||
+    maj >= 26;
+  if (okNode) ok(`Node ${process.versions.node}（满足 jsdom 30 的引擎要求）`);
+  else fail(`Node ${process.versions.node} 不满足 jsdom 30 要求：^22.22.2 || ^24.15.0 || >=26`);
+
+  let jsdomPkg = null;
+  try {
+    jsdomPkg = require("jsdom/package.json");
+  } catch (e) {
+    warn("没装 jsdom，跳过依赖检查（先跑 npm install）");
+  }
+  if (jsdomPkg) ok(`jsdom ${jsdomPkg.version}`);
+  try {
+    ok(`undici ${require("undici/package.json").version}`);
+  } catch (e) {
+    warn("没找到 undici（jsdom 的依赖）");
+  }
+}
+
 // ---------------------------------------------------------------- 1. 语法
 
-console.log("[1/6] 语法检查");
+console.log("[1/7] 语法检查");
 const jsFiles = walk(SRC)
   .concat(walk(path.join(ROOT, "tools")), walk(path.join(ROOT, "tests")))
   .filter((f) => f.endsWith(".js"));
@@ -66,7 +99,7 @@ if (failures === 0) ok(`${jsFiles.length} 个 JS 文件语法正常`);
 
 // ---------------------------------------------------------------- 2. manifest
 
-console.log("[2/6] manifest.json");
+console.log("[2/7] manifest.json");
 let manifest = null;
 try {
   manifest = JSON.parse(fs.readFileSync(path.join(SRC, "manifest.json"), "utf8"));
@@ -92,7 +125,7 @@ if (manifest) {
 
 // ---------------------------------------------------------------- 3. 注入清单
 
-console.log("[3/6] 注入清单");
+console.log("[3/7] 注入清单");
 const WANT_ORDER = ["core/matcher.js", "core/dict.js", "core/translate.js", "core/annotate.js", "main.js"];
 if (manifest && manifest.injects && manifest.injects.Main) {
   const files = manifest.injects.Main.map((i) => i.file);
@@ -111,7 +144,7 @@ if (manifest && manifest.injects && manifest.injects.Main) {
 
 // ---------------------------------------------------------------- 4. 词典
 
-console.log("[4/6] 离线词典");
+console.log("[4/7] 离线词典");
 let dict = null;
 try {
   dict = require(path.join(SRC, "core", "dict.js"));
@@ -137,7 +170,7 @@ if (dict) {
 
 // ---------------------------------------------------------------- 5. 元信息一致性
 
-console.log("[5/6] 元信息与仓库地址");
+console.log("[5/7] 元信息与仓库地址");
 const MANIFEST = manifest || {};
 const EXPECTED_OWNER = "YXLEI0";
 const EXPECTED_REPO = "katakana-terminator-betterncm";
@@ -169,7 +202,7 @@ if (!placeholders) ok("没有残留的 OWNER 占位符");
 
 // ---------------------------------------------------------------- 6. 秘密信息
 
-console.log("[6/6] 秘密信息检查");
+console.log("[6/7] 秘密信息检查");
 const SECRET_PATTERNS = [
   [/gh[pousr]_[A-Za-z0-9]{20,}/, "GitHub token"],
   [/github_pat_[A-Za-z0-9_]{20,}/, "GitHub fine-grained token"],

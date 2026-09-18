@@ -14,18 +14,23 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 不能用 20：jsdom 30 要求 ^22.22.2 || ^24.15.0 || >=26，
+          # 在 Node 20 上它内嵌的 undici 会直接崩（webidl.util.markAsUncloneable
+          # is not a function），四个测试文件全部报 testCodeFailure。
+          # 必须钉到满足引擎要求的版本，写 "22" 解析出来的可能仍低于 22.22.2。
+          node-version: "22.22.2"
 
       - name: 安装依赖
         run: npm install --no-audit --no-fund
+
+      - name: 打印环境
+        run: node -v && npm -v
 
       - name: 静态自检（语法 / manifest / 词典 / 密钥）
         run: npm run check
 
       - name: 单元测试
-        run: |
-          # node --test 在某些受限环境里起不了子进程，退回逐个文件跑
-          node --test tests/ || npm run test:serial
+        run: npm test
 
       - name: 打包 .plugin
         run: npm run build
@@ -49,7 +54,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 与 test job 保持一致，理由见上
+          node-version: "22.22.2"
 
       - name: 安装依赖
         run: npm install --no-audit --no-fund
