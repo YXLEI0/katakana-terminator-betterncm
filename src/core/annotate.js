@@ -235,14 +235,25 @@
       }
       host.insertBefore(tail, leadIsRuby ? null : node.nextSibling);
 
-      // 记录：原节点是否还留在 host 里（leadIsRuby 时它已被移除），
-      // 以及注音节点清单，还原时按这个把 DOM 收回去。
+      // 记录：原节点是否还留在 host 里（leadIsRuby 时它已被移除）、
+      // 注音节点清单，以及它原来插在哪个位置（host 的子节点下标）。
+      // 记下标是为了让 kept=false 的形态能原样还原 —— 还原时我们插的节点
+      // 会被逐个摘掉，届时再想找"插回哪儿"就已经晚了。
+      var index = 0;
+      var cn = host.childNodes;
+      for (var ci = 0; ci < cn.length; ci++) {
+        if (cn[ci] === node) {
+          index = ci;
+          break;
+        }
+      }
       records.set(node, {
         host: host,
         nodes: inserted,
         plain: text,
         region: region,
         kept: !leadIsRuby,
+        index: index,
       });
 
       if (options.log && records.size <= 12) {
@@ -295,25 +306,43 @@
       var host = rec.host;
       var i;
 
-      // kept=false：原节点在注入时被移除了，先按原位置放回去
-      if (!rec.kept && host && host.isConnected && node.parentNode !== host) {
-        host.insertBefore(node, host.firstChild);
+      if (host && host.isConnected && node.parentNode === host) {
+        // 原节点还在 host 里（kept=true 的形态），把原文写回去
+        node.nodeValue = rec.plain;
+      } else if (host && host.isConnected && rec.kept) {
+        // kept=true 却找不到原节点：说明 React 把整棵子树重建过了，
+        // 原文已经在 DOM 里。这时绝对不能再把我们的旧节点插回去 ——
+        // 那会和 React 的新节点并存，同一句话渲染两遍。
+        // 只清掉我们插的节点，DOM 让 React 说了算。
+        removeInjected(rec);
+        records.delete(node);
+        untagIfClean(host, rec.region);
+        return;
+      } else if (host && host.isConnected && !rec.kept) {
+        // kept=false（文本以片假名开头，注入时移除了原节点）：
+        // 按注入前记下的下标把原节点插回去。
+        var ref = host.childNodes[rec.index] || null;
+        host.insertBefore(node, ref);
+        node.nodeValue = rec.plain;
+      } else {
+        node.nodeValue = rec.plain;
       }
 
-      // 摘掉我们插进去的所有节点（注音 + 文本分段）。
-      // 这一步必须在 nodeValue 复位之前做完，否则文本会对不上。
-      for (i = 0; i < rec.nodes.length; i++) {
+      removeInjected(rec);
+      records.delete(node);
+      untagIfClean(host, rec.region);
+    }
+
+    /** 摘掉我们插进去的所有节点（注音 + 文本分段） */
+    function removeInjected(rec) {
+      for (var i = 0; i < rec.nodes.length; i++) {
         var n = rec.nodes[i];
         if (n.parentNode) n.parentNode.removeChild(n);
       }
+    }
 
-      // 原节点若还在 host 里（kept=true 或刚插回来），把原文写回去
-      node.nodeValue = rec.plain;
-      if (node.parentNode !== host && host && host.isConnected) host.appendChild(node);
-
-      records.delete(node);
-      // 区域里没有我们的节点了就把标记撤掉
-      var region = rec.region;
+    /** 宿主/区域里已经没有我们的注音了，就把标记摘干净 */
+    function untagIfClean(host, region) {
       if (region && region.isConnected && !region.querySelector("ruby.kt-ruby")) {
         untag(region, "kt-region");
       }
@@ -360,17 +389,17 @@
     }
 
     /**
-     * 处理被 React 重建过的记录：原来的宿主整棵子树被换掉，我们插的注音
-     * 跟着成了孤儿。isConnected 判断不出这种情况（节点还连在被丢弃的子树里），
-     * 所以要额外看宿主本身还在不在文档里。
+     * 记录是否已经作废。
+     *
+     * 判据只有一条：**宿主不在文档里了**。
+     *
+     * 不能拿「我们插的节点都不见了」当依据 —— 宿主还在、只是 React 把我们的
+     * 注音节点摘掉了，这是最常见的情况，而它恰恰需要重新注音，不是丢弃记录。
+     * 早期版本在这里判错，导致被摘掉注音的歌词行再也标不回来
+     * （restore 完就把记录删了，同一轮里不会再注一次）。
      */
     function orphaned(rec) {
-      var host = rec.host;
-      if (host && !host.isConnected) return true;
-      for (var i = 0; i < rec.nodes.length; i++) {
-        if (rec.nodes[i].isConnected) return false;
-      }
-      return true;
+      return !(rec.host && rec.host.isConnected);
     }
 
     /** 撤掉孤儿记录（连带把丢弃子树里的注入节点摘掉，免得 React 复用时看到过期注音） */
@@ -391,20 +420,48 @@
     }
 
     /**
-     * 判断某条记录是不是"馊了"：我们只切短了原文本节点、没有删除它，
-     * 所以如果 React 又把它的值改回去了（nodeValue 不再是我们留下的那一段），
-     * 说明原文已经回来、注音该撤掉重做。
+     * 某条记录对应的「可见原文」——把注音（<rt>/.kt-rt）排除掉，只看底字。
+     * 用来判断注音是否仍然有效。
+     */
+    function visibleText(el) {
+      var out = "";
+      var walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+          for (var p = node.parentNode; p && p !== el; p = p.parentNode) {
+            if (p.tagName === "RT" || (p.classList && p.classList.contains("kt-rt"))) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      while (walker.nextNode()) out += walker.currentNode.nodeValue || "";
+      return out;
+    }
+
+    /**
+     * 判断某条记录是不是「馊了」。
      *
-     * 注意不能拿 host.textContent 比对：注音 <rt> 的文字也算 textContent，
-     * 那会永远判定为"变了"。
+     * 只用 isConnected 判断会误伤：网易云（以及 RefinedNowPlaying 这类歌词插件）
+     * 几乎每 250ms 就会重建一次歌词行的 DOM，我们插的节点时连时断，于是每轮扫描
+     * 都「还原 -> 重新注音」一遍。实测轨迹里就是这个样子：
+     *
+     *   [pass] regions=50 changed=20 restored=20   ← 每秒重复四次
+     *
+     * 肉眼看到的就是歌词一直在闪（抽搐）。
+     *
+     * 所以判断标准换成「可见原文有没有变」：只要底字还是我们注音时那句话，
+     * 注音就依然有效，哪怕插进去的节点被 React 换过也无所谓 —— 让它留着，
+     * 不要动 DOM，这样才不会闪。
      */
     function isStale(rec, node) {
-      if (!rec.host || !rec.host.isConnected) return false;
-      if (node.parentNode !== rec.host) return true; // 原节点被挪走了
-      for (var i = 0; i < rec.nodes.length; i++) {
-        if (!rec.nodes[i].isConnected) return true; // 注音被摘掉了
-      }
-      return false;
+      var host = rec.host;
+      if (!host || !host.isConnected) return true;
+      // 只有「保留了原节点」的记录才检查它还在不在；
+      // 文本以片假名开头时原节点本来就被移除了，不能拿这个当失效依据
+      // （否则每轮都会判定为馊了，变成一直闪）。
+      if (rec.kept && node.parentNode !== host) return true;
+      return visibleText(host) !== rec.plain;
     }
 
     /**
@@ -494,35 +551,60 @@
       var list = regions && regions.length ? regions : findRegions("safe");
       if (!list.length) return { scanned: 0, changed: 0, restored: restored };
 
+      // 先收集一遍待检查的文本节点。
+      // 注意：还原（restoreRecord）会改变 host 的子节点结构，但那些文本节点
+      // 本身还是原来那些对象——原节点、我们插入的文本分段都还是同一批。
+      // 所以这里先收集、循环里再读 node.nodeValue 是安全的；
+      // 反过来先在循环内收集就会漏掉「刚被还原成原文」的节点
+      // （快照拍在还原之前，拿到的是"今日は"这种被切短的半截文本，
+      // 于是那一行永远标不回来）。
+      var candidates = collectTextNodes(list);
+
       var changed = 0;
-      for (var r = 0; r < list.length; r++) {
-        if (!list[r].isConnected) continue;
-        var nodes = collectTextNodes([list[r]]);
-        for (var i = 0; i < nodes.length; i++) {
-          var node = nodes[i];
-          if (records.has(node)) continue; // 已经是注音版了
-          // 制作信息行跳过
-          if (RE_CREDIT.test(node.nodeValue || "")) continue;
-          try {
-            if (annotateNode(node, list[r])) {
-              changed++;
-              // 只在真的注了音之后才打区域标记
-              if (list[r].classList && !list[r].classList.contains("kt-region")) {
-                list[r].classList.add("kt-region");
-              }
+      for (var i = 0; i < candidates.length; i++) {
+        var node = candidates[i];
+        if (records.has(node)) continue; // 已经是注音版了
+        // 所属区域：可能是被包含的子区域，取文档顺序里第一个包含它的
+        var region = list[0];
+        for (var ri = 0; ri < list.length; ri++) {
+          if (list[ri].contains(node)) {
+            region = list[ri];
+            break;
+          }
+        }
+        if (!region.isConnected) continue;
+
+        // 注音被摘掉/文本被 React 改过的，先还原成纯文本再重做
+        var rec = records.get(node);
+        if (rec) {
+          if (!isStale(rec, node)) continue; // 依然有效，别动它
+          restoreRecord(node, rec);
+          restored++;
+        }
+
+        // 每次重新读值：上面可能刚把原文写回来
+        var text = node.nodeValue || "";
+        if (text.length < 2) continue;
+        if (RE_CREDIT.test(text)) continue; // 制作信息行跳过
+        try {
+          if (annotateNode(node, region)) {
+            changed++;
+            // 只在真的注了音之后才打区域标记
+            if (region.classList && !region.classList.contains("kt-region")) {
+              region.classList.add("kt-region");
             }
-          } catch (e) {
-            // 单个节点失败不影响其它节点；把现场记下来便于定位
-            if (options.log) {
-              options.log(
-                "注音失败 tag=" +
-                  (list[r].tagName || "?") +
-                  " cls=" +
-                  String(list[r].className || "").slice(0, 60) +
-                  " err=" +
-                  ((e && e.message) || e)
-              );
-            }
+          }
+        } catch (e) {
+          // 单个节点失败不影响其它节点；把现场记下来便于定位
+          if (options.log) {
+            options.log(
+              "注音失败 tag=" +
+                (region.tagName || "?") +
+                " cls=" +
+                String(region.className || "").slice(0, 60) +
+                " err=" +
+                ((e && e.message) || e)
+            );
           }
         }
       }

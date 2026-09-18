@@ -55,6 +55,9 @@ function baseText(el) {
   return clone.textContent;
 }
 
+// 语义别名：用它更能表达「看上去的原文」，实现和 baseText 相同
+const visibleTextOf = baseText;
+
 test("给歌词里的片假名加上 ruby 注音", () => {
   const ctx = newCtx();
   const ann = makeAnnotator(ctx);
@@ -289,6 +292,82 @@ test("文本以片假名开头时也不会留下重影", () => {
   ann.restoreAll();
   assert.strictEqual(baseText(p), "コーヒーを飲む");
   assert.strictEqual(ctx.document.body.innerHTML.includes("コーヒーコーヒー"), false);
+});
+
+test("片假名开头的歌词行稳定后不能被反复「还原 + 重注」（抽搐的根因）", () => {
+  // 这一行以片假名开头，注入时原文本节点会被移除（kept=false）。
+  // 早期版本用 node.parentNode !== host 判断"馊了"，对这种形态永远为真，
+  // 于是每轮扫描都还原重做一次 —— 轨迹里就是 regions=50 changed=20 restored=20
+  // 每秒重复四次，肉眼看到的就是歌词一直闪。
+  const ctx = loadCore(
+    `<!doctype html><html><body><ul class="lyric"><li><p>コーヒーを飲みながら</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+
+  ann.pass();
+  const p = ctx.document.querySelector("ul.lyric li p");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "应该已注音");
+  assert.strictEqual(ann.injectedCount(), 1, "一条记录");
+  const annotatedHtml = p.innerHTML;
+
+  // 稳定状态：连续几轮都不该有任何改动
+  for (let i = 0; i < 3; i++) {
+    const r = ann.pass();
+    assert.strictEqual(r.restored, 0, `第 ${i + 2} 轮不该还原`);
+    assert.strictEqual(r.changed, 0, `第 ${i + 2} 轮不该重注`);
+  }
+  assert.strictEqual(visibleTextOf(p), "コーヒーを飲みながら", "内容不能被改动");
+  assert.strictEqual(p.innerHTML, annotatedHtml, "稳定期间 DOM 一个字节都不该变");
+
+  // 再跑两轮，确认已经完全稳定（不会因为 kept=false 就一直重做）
+  assert.strictEqual(ann.pass().restored, 0);
+  assert.strictEqual(ann.pass().changed, 0);
+  assert.strictEqual(p.innerHTML, annotatedHtml, "最终 DOM 必须稳定不变");
+});
+
+test("React 丢掉注音但底字没变时，可以重做（有界，不会每轮都做）", () => {
+  // 非片假名开头（kept=true）：React 把我们的注音节点丢了，底字还在。
+  // 这种情况重新注音是合理的（否则页面就永远没有注音了），
+  // 关键是它必须在下一轮就收敛，不能每轮都动。
+  const ctx = loadCore(
+    `<!doctype html><html><body><ul class="lyric"><li><p>今日はコーヒーです</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+  ann.pass();
+
+  const p = ctx.document.querySelector("ul.lyric li p");
+  const node = p.firstChild;
+  while (p.lastChild !== node) p.removeChild(p.lastChild); // React 丢掉我们的节点
+  assert.strictEqual(p.querySelectorAll("ruby").length, 0);
+
+  const r = ann.pass();
+  assert.ok(r.changed >= 1, "应该重新注音");
+  assert.strictEqual(p.querySelectorAll("ruby").length, 1);
+  // 重做之后必须收敛
+  const r2 = ann.pass();
+  assert.strictEqual(r2.changed, 0, "重做后应立刻稳定");
+  assert.strictEqual(r2.restored, 0);
+});
+
+test("React 整棵子树重建时不能把旧节点插回去（会渲染两遍）", () => {
+  const ctx = newCtx();
+  const ann = makeAnnotator(ctx);
+  ann.pass();
+  const p = ctx.document.querySelector("ul.lyric li p");
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1);
+  const original = baseText(p);
+
+  // 整行被换成全新的节点（React 重建子树）
+  const fresh = ctx.document.createTextNode(original);
+  while (p.firstChild) p.removeChild(p.firstChild);
+  p.appendChild(fresh);
+  ann.pass();
+
+  // 底字只能出现一次（旧节点若被插回去就会重复），且重新注音一次
+  assert.strictEqual(baseText(p), original, "底字不能重复");
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "应该重新注音且只注一次");
 });
 
 test("文本节点里既有词又有普通文本时，拼接顺序不乱", () => {
