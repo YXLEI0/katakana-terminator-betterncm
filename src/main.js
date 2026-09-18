@@ -78,6 +78,20 @@
 
   var config = loadConfig();
 
+  /*
+   * 紧急开关：插件一旦把页面搞崩，设置面板也进不去，所以留一个不依赖 UI 的
+   * 关闭方式。在网易云的开发者工具控制台执行：
+   *     localStorage['katakana-terminator.off'] = '1'   // 并重启
+   * 插件会完全不启动，DOM 一个字节都不动。
+   */
+  function emergencyOff() {
+    try {
+      return localStorage.getItem("katakana-terminator.off") === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
   function devMode() {
     try {
       if (typeof plugin !== "undefined" && plugin.devMode) return true;
@@ -139,6 +153,11 @@
 
   function pass() {
     if (!config.enabled || !state.annotator) return;
+    // 改动 localStorage 后不重启也能立刻停手（下一轮扫描前生效）
+    if (emergencyOff()) {
+      disable();
+      return;
+    }
     var t0 = performance.now();
     try {
       var regions = buildRegions();
@@ -168,15 +187,20 @@
   function startObserver() {
     if (state.observer) return;
     var observer = new MutationObserver(function (records) {
-      var relevant = false;
-      for (var i = 0; i < records.length; i++) {
-        var r = records[i];
-        if (r.type === "characterData" || r.type === "childList") {
-          relevant = true;
-          break;
+      // 回调里出错会变成未捕获异常，可能连带把宿主页面搞崩；这里兜住。
+      try {
+        var relevant = false;
+        for (var i = 0; i < records.length; i++) {
+          var r = records[i];
+          if (r.type === "characterData" || r.type === "childList") {
+            relevant = true;
+            break;
+          }
         }
+        if (relevant) schedule();
+      } catch (e) {
+        warn("MutationObserver 回调异常", e);
       }
-      if (relevant) schedule();
     });
     state.observer = observer;
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -458,6 +482,10 @@
   });
 
   plugin.onLoad(function () {
+    if (emergencyOff()) {
+      warn("已设置 localStorage['katakana-terminator.off']=1，本次不启动。清掉这个键并重启即可恢复。");
+      return;
+    }
     if (typeof KTMatcher === "undefined" || typeof KTAnnotate === "undefined") {
       warn("核心模块未注入，检查 manifest.json 的 injects 顺序");
       return;

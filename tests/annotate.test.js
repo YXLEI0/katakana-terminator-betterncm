@@ -222,6 +222,44 @@ test("半角片假名在页面里也能查到词典", () => {
   assert.strictEqual(baseText(ctx.document.querySelector("ul.lyric li p")), "ｺｰﾋｰ");
 });
 
+test("注入不会替换 React 持有的文本节点（这是不把 React 搞崩的关键）", () => {
+  // 文本不以片假名开头：原文本节点必须原样保留，只被「切短」
+  const ctx = newCtx(
+    `<!doctype html><html><body><ul class="lyric"><li><p>今日はコーヒーです</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const p = ctx.document.querySelector("ul.lyric li p");
+  const reactNode = p.firstChild; // 假装这是 React 内部持有的那个引用
+  assert.strictEqual(reactNode.nodeType, 3);
+
+  makeAnnotator(ctx).pass();
+
+  assert.strictEqual(p.firstChild, reactNode, "原文本节点必须还在，且还在第一个位置");
+  assert.strictEqual(reactNode.parentNode, p, "原文本节点不能脱离父节点");
+  // React 之后会在这个节点上执行 setTextContent，必须仍然有效
+  assert.doesNotThrow(() => {
+    reactNode.nodeValue = "明日はカフェです";
+  }, "React 更新这个节点不应该抛错");
+});
+
+test("文本以片假名开头时也不会留下重影", () => {
+  // 这种情况原节点没法保留（第 0 段本身要带注音），
+  // 但渲染出来的底字必须只出现一次
+  const ctx = newCtx(
+    `<!doctype html><html><body><ul class="lyric"><li><p>コーヒーを飲む</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+  ann.pass();
+  const p = ctx.document.querySelector("ul.lyric li p");
+  assert.deepStrictEqual(rubyPairs(p), [["コーヒー", "coffee"]]);
+  assert.strictEqual(baseText(p), "コーヒーを飲む", "底字不能重复");
+  // 还原后同样不能有重影
+  ann.restoreAll();
+  assert.strictEqual(baseText(p), "コーヒーを飲む");
+  assert.strictEqual(ctx.document.body.innerHTML.includes("コーヒーコーヒー"), false);
+});
+
 test("文本节点里既有词又有普通文本时，拼接顺序不乱", () => {
   const html = `<!doctype html><html><body><ul class="lyric"><li><p>これはコーヒーです</p></li></ul></body></html>`;
   const ctx = loadCore(html);

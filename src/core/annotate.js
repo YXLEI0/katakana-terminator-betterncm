@@ -157,47 +157,73 @@
       }
       if (!any) return false;
 
-      // 有词要标，才建 fragment
-      var frag = doc.createDocumentFragment();
+      // 有词要标，才动手
+      var host = node.parentNode;
+      if (!host) return false;
+
+      // 关键：不替换原文本节点，只把它「切短」，注音作为兄弟节点插在中间。
+      //
+      // 为什么这样做：React 更新纯文本时执行的是 setTextContent(node)，
+      // node 是它内部持有的那个文本节点引用。如果这个节点被我们删掉/换成
+      // 别的节点，React 的引用就失效了，commit 阶段可能直接抛错，
+      // 整个页面会掉进 NMC 的错误页（"应用出错了…重启下试试吧"）。
+      // 保留原节点既能满足 React，也不影响我们的注音排版。
+      var pieces = [];
       var pos = 0;
       var inserted = [];
       for (var j = 0; j < tokens.length; j++) {
         var tk = tokens[j];
-        if (tk.start > pos) frag.appendChild(doc.createTextNode(text.slice(pos, tk.start)));
+        if (tk.start > pos) pieces.push({ text: text.slice(pos, tk.start) });
         if (!glosses[j]) {
-          frag.appendChild(doc.createTextNode(tk.text));
+          pieces.push({ text: tk.text });
         } else {
           var ruby = buildRuby(tk.text, glosses[j]);
-          frag.appendChild(ruby);
+          pieces.push({ text: tk.text, ruby: ruby });
           inserted.push(ruby);
         }
         pos = tk.end;
       }
-      if (pos < text.length) frag.appendChild(doc.createTextNode(text.slice(pos)));
+      if (pos < text.length) pieces.push({ text: text.slice(pos) });
 
       if (!inserted.length) return false;
 
-      var host = node.parentNode;
-      if (!host) return false;
+      // 注入方式：尽量保留 React 持有的那个原文本节点，只把它「切短」，
+      // 注音和其他段落作为兄弟节点插到它后面。
+      //
+      // 为什么优先保留原节点：React 更新纯文本时执行 setTextContent(node)，
+      // node 是它内部持有的引用。如果这个节点被删掉换成别的节点，React 的引用
+      // 就失效了，commit 阶段可能直接抛错，整页掉进 NMC 的错误页
+      // （"应用出错了…重启下试试吧"）。保留它既能满足 React，也不影响排版。
+      //
+      // 例外：文本正好以片假名词开头时，第 0 段本身带注音，不能既留原文又插注音
+      // （那样底字会渲染两遍）。这种情况直接移除原节点，注音从第 0 段开始排。
+      var leadIsRuby = !!pieces[0].ruby;
+      var tail = doc.createDocumentFragment();
+      var startIndex = 0;
+      if (!leadIsRuby) {
+        node.nodeValue = pieces[0].text;
+        startIndex = 1;
+      } else if (node.parentNode === host) {
+        host.removeChild(node);
+      }
+      // inserted 要记「我们插进去的每一个节点」—— 包括那些纯文本分段。
+      // 只记注音的话，还原时这些分段会留在 DOM 里，原文就会重复一遍。
+      for (var k = startIndex; k < pieces.length; k++) {
+        var piece = pieces[k];
+        var childNode = piece.ruby || doc.createTextNode(piece.text);
+        tail.appendChild(childNode);
+        inserted.push(childNode);
+      }
+      host.insertBefore(tail, leadIsRuby ? null : node.nextSibling);
 
-      // 记下注入前 host 的子节点。还原时把这些节点按原顺序整体放回，
-      // 就能逐字节回到原样；比"把原节点 insertBefore 到某个锚点前面"这种
-      // 按位置猜测的做法可靠（原节点和它后面的尾巴节点常常是相邻的，
-      // 按下标逐个 insertBefore 会把自己又挪一遍）。
-      var siblings = [];
-      for (var ci = 0; ci < host.childNodes.length; ci++) siblings.push(host.childNodes[ci]);
-      host.__ktOrig = siblings;
-
-      host.insertBefore(frag, node);
-      host.removeChild(node);
-
+      // 记录：原节点是否还留在 host 里（leadIsRuby 时它已被移除），
+      // 以及注音节点清单，还原时按这个把 DOM 收回去。
       records.set(node, {
         host: host,
         nodes: inserted,
         plain: text,
         region: region,
-        // 注入后 host 应有的文本（用于识别 React 原地改内容的情形）
-        expected: host.textContent,
+        kept: !leadIsRuby,
       });
 
       if (!hasRubyLayout(doc) && host.classList && !host.classList.contains("kt-fallback")) {
@@ -226,33 +252,35 @@
       return ruby;
     }
 
-    /** 还原某个文本节点：撤掉我们插的节点，把原文本按原顺序放回去 */
+    /**
+     * 还原某条记录。
+     *
+     * 注入时有两种形态，还原也要分两种情况：
+     *   kept=true  —— 原文本节点还在（被切短了），注音插在它后面：
+     *                 摘掉注音，把后面残留的纯文本兄弟并回原节点。
+     *   kept=false —— 文本以片假名词开头，原节点已被移除、注音取而代之：
+     *                 摘掉注音，把原节点（值是完整原文）插回原位置。
+     */
     function restoreRecord(node, rec) {
       var host = rec.host;
       var i;
-      var siblings = host && host.__ktOrig;
-      if (host && host.isConnected && siblings) {
-        // 先把 host 清空，再按注入前记下的顺序整体放回。
-        // 「清空 + 重放」而不是「逐个 insertBefore」：原节点和它后面的尾巴
-        // 文本节点经常是相邻的，按下标插会把自己再挪一次，结果重复。
-        while (host.firstChild) host.removeChild(host.firstChild);
-        for (i = 0; i < siblings.length; i++) {
-          var child = siblings[i];
-          if (child === node) {
-            node.nodeValue = rec.plain;
-            host.appendChild(node);
-          } else {
-            host.appendChild(child);
-          }
-        }
+
+      // kept=false：原节点在注入时被移除了，先按原位置放回去
+      if (!rec.kept && host && host.isConnected && node.parentNode !== host) {
+        host.insertBefore(node, host.firstChild);
       }
-      // 把还挂在文档里的注入节点移除（host 被 React 换掉时它们会变成孤儿，
-      // 但通常还连在别处，兜一道）
+
+      // 摘掉我们插进去的所有节点（注音 + 文本分段）。
+      // 这一步必须在 nodeValue 复位之前做完，否则文本会对不上。
       for (i = 0; i < rec.nodes.length; i++) {
         var n = rec.nodes[i];
         if (n.parentNode) n.parentNode.removeChild(n);
       }
+
+      // 原节点若还在 host 里（kept=true 或刚插回来），把原文写回去
       node.nodeValue = rec.plain;
+      if (node.parentNode !== host && host && host.isConnected) host.appendChild(node);
+
       records.delete(node);
       // 区域里没有我们的节点了就把标记撤掉
       var region = rec.region;
@@ -261,7 +289,6 @@
       }
       if (host && host.isConnected && !host.querySelector("ruby.kt-ruby")) {
         untag(host, "kt-fallback");
-        host.__ktOrig = null;
       }
     }
 
@@ -289,10 +316,7 @@
       var fallbacks = doc.querySelectorAll(".kt-fallback");
       for (var j = 0; j < fallbacks.length; j++) {
         var el = fallbacks[j];
-        if (!el.querySelector("ruby.kt-ruby")) {
-          untag(el, "kt-fallback");
-          el.__ktOrig = null;
-        }
+        if (!el.querySelector("ruby.kt-ruby")) untag(el, "kt-fallback");
       }
     }
 
@@ -306,10 +330,9 @@
     }
 
     /**
-     * 处理被 React 重建过的记录：原文已经回来，我们插进去的节点成了孤儿。
-     * 注意 stillApplied 用 isConnected 判断 —— 元素被整体替换后，我们插的节点
-     * 还挂在"那棵被丢弃的子树"里，所以还连在它的宿主上，只是宿主脱离了文档。
-     * 这种情况下节点不是马上 isConnected=false，得看宿主还在不在文档里。
+     * 处理被 React 重建过的记录：原来的宿主整棵子树被换掉，我们插的注音
+     * 跟着成了孤儿。isConnected 判断不出这种情况（节点还连在被丢弃的子树里），
+     * 所以要额外看宿主本身还在不在文档里。
      */
     function orphaned(rec) {
       var host = rec.host;
@@ -332,23 +355,26 @@
           var n = rec.nodes[j];
           if (n.parentNode) n.parentNode.removeChild(n);
         }
-        if (rec.host && rec.host.__ktOrig && !rec.host.querySelector("ruby.kt-ruby")) {
-          rec.host.__ktOrig = null;
-        }
         records.delete(dead[i]);
       }
       return dead.length;
     }
 
     /**
-     * 判断某条记录是不是"馊了"：React 可能原地改掉文本值，
-     * 这时我们插的节点还连着（stillApplied 看不出来），但 host 的内容
-     * 已经和我们注入前记的不一样了（jp-furigana 里的 hostsText 检查）。
+     * 判断某条记录是不是"馊了"：我们只切短了原文本节点、没有删除它，
+     * 所以如果 React 又把它的值改回去了（nodeValue 不再是我们留下的那一段），
+     * 说明原文已经回来、注音该撤掉重做。
+     *
+     * 注意不能拿 host.textContent 比对：注音 <rt> 的文字也算 textContent，
+     * 那会永远判定为"变了"。
      */
-    function isStale(rec) {
-      var host = rec.host;
-      if (!host || !host.isConnected || !rec.expected) return false;
-      return host.textContent !== rec.expected;
+    function isStale(rec, node) {
+      if (!rec.host || !rec.host.isConnected) return false;
+      if (node.parentNode !== rec.host) return true; // 原节点被挪走了
+      for (var i = 0; i < rec.nodes.length; i++) {
+        if (!rec.nodes[i].isConnected) return true; // 注音被摘掉了
+      }
+      return false;
     }
 
     /**
@@ -417,10 +443,10 @@
       // 先把 React 已经重建掉的记录清掉
       var restored = dropDetached();
 
-      // 内容被 React 原地改掉的，先还原成原文，再重新处理
+      // 注音被 React 摘掉/挪走的，先还原回纯文本，再重新处理
       var stale = [];
       records.forEach(function (rec, node) {
-        if (isStale(rec)) stale.push(node);
+        if (isStale(rec, node)) stale.push(node);
       });
       for (var si = 0; si < stale.length; si++) {
         restoreRecord(stale[si], records.get(stale[si]));
