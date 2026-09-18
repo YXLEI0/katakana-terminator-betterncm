@@ -100,6 +100,9 @@
     }
   }
 
+  // 改了默认值就 +1，用来把旧版本存下来的设置迁移掉
+  var CONFIG_VERSION = 2;
+
   function loadConfig() {
     var saved = {};
     try {
@@ -110,6 +113,14 @@
     var cfg = {};
     for (var k in DEFAULTS) cfg[k] = DEFAULTS[k];
     for (var k2 in saved) if (k2 in DEFAULTS) cfg[k2] = saved[k2];
+
+    // v1 -> v2：歌词标注改成默认关闭。
+    // 旧版本存下来的 scope 可能是 "lyrics"/"all"/"auto"，那会让"默认不标歌词"
+    // 失效（真机轨迹里出现过：明明默认是 titles，却还在标 rnp-lyrics-line）。
+    // 迁移时强制回到 titles —— 想开歌词的人重新选一次即可。
+    if (!(saved.configVersion >= 2)) {
+      cfg.scope = DEFAULTS.scope;
+    }
     cfg.configVersion = CONFIG_VERSION;
     return cfg;
   }
@@ -577,10 +588,12 @@
         emergencyOff() +
         " enabled=" +
         config.enabled +
-        " annotateAll=" +
-        config.annotateAll +
         " scope=" +
         config.scope +
+        " annotateAll=" +
+        config.annotateAll +
+        " cfgVer=" +
+        config.configVersion +
         " 模块 matcher=" +
         (typeof KTMatcher) +
         " annotate=" +

@@ -292,14 +292,18 @@
         reAnnotated: !!(prevDecision && prevDecision.plain === text),
       });
 
-      if (options.log && records.size <= 12) {
+      if (options.log && records.size <= 40) {
+        // 记下区域的身份：真机排障时，光看文字分不清是歌词还是标题，
+        // 必须能看出命中的是哪些 class。
         options.log(
-          "注音 " +
+          "已注音 region=" +
             (region.tagName || "?") +
             "." +
-            String(region.className || "").split(" ")[0] +
-            " <- " +
-            JSON.stringify(text.slice(0, 40))
+            String(region.className || "").split(" ").slice(0, 2).join(".") +
+            " host=" +
+            (host.tagName || "?") +
+            " 文本=" +
+            JSON.stringify(text.slice(0, 30))
         );
       }
 
