@@ -25,9 +25,16 @@
   var DEFAULTS = {
     enabled: true,
     online: true, // 词典没有的词是否联网翻译
-    annotateAll: true, // 是否标播放栏的歌曲名/歌手（白名单，绝不含整页）
-    scope: "titles", // titles（默认，稳定）| lyrics | all | custom
+    annotateAll: true, // 是否标播放栏的歌曲名/歌手（DOM 注音，稳定）
+    // 默认两种都标：歌词走浮层（不碰 DOM），播放栏走 DOM 注音。
+    // 歌词用浮层是因为 jp-furigana 这类插件会重建歌词行，往里插节点必被抹掉。
+    scope: "all", // titles | lyrics | all | custom
     customSelector: "",
+    // 歌词用哪种渲染：
+    //   "overlay" —— 浮层（默认）：完全不碰歌词 DOM，因此不会和 jp-furigana
+    //                之类会重建歌词行的插件打架；代价是不参与排版、需重新测量
+    //   "inline"  —— 直接在歌词行里插 <ruby>：排版正确，但会和 jp-furigana 冲突
+    lyricRender: "overlay",
     rtSize: 60, // 注音字号（相对底字百分比）
     rtOpacity: 80, // 注音不透明度
     focusDebug: false, // 给已注音区域描边，用来排障
@@ -114,12 +121,12 @@
     for (var k in DEFAULTS) cfg[k] = DEFAULTS[k];
     for (var k2 in saved) if (k2 in DEFAULTS) cfg[k2] = saved[k2];
 
-    // v1 -> v2：歌词标注改成默认关闭。
-    // 旧版本存下来的 scope 可能是 "lyrics"/"all"/"auto"，那会让"默认不标歌词"
-    // 失效（真机轨迹里出现过：明明默认是 titles，却还在标 rnp-lyrics-line）。
-    // 迁移时强制回到 titles —— 想开歌词的人重新选一次即可。
+    // v1 -> v2：歌词改成走浮层渲染（不再往歌词 DOM 里插节点）。
+    // 旧版本存下来的 lyricRender / scope 可能还是旧的组合，统一按新默认来，
+    // 避免"改了默认值但对老配置无效"（之前踩过这个坑）。
     if (!(saved.configVersion >= 2)) {
       cfg.scope = DEFAULTS.scope;
+      cfg.lyricRender = DEFAULTS.lyricRender;
     }
     cfg.configVersion = CONFIG_VERSION;
     return cfg;
@@ -164,6 +171,7 @@
   var state = {
     translator: null,
     annotator: null,
+    overlay: null,
     observer: null,
     timer: null,
     tickTimer: null,
@@ -188,26 +196,60 @@
 
   // ------------------------------------------------------------ 扫描
 
+  /**
+   * 歌词是不是该用浮层渲染。
+   * 浮层完全不碰歌词 DOM，所以能和安全第一的插件（jp-furigana）共存。
+   */
+  function useOverlayForLyrics() {
+    return (
+      config.lyricRender !== "inline" &&
+      !!state.overlay &&
+      (config.scope === "lyrics" || config.scope === "all")
+    );
+  }
+
+  /** 取出歌词区域（只用来量位置，浮层不改它们） */
+  function lyricRegions() {
+    if (!state.annotator) return [];
+    if (config.scope === "custom" && config.customSelector) {
+      var custom = state.annotator.customRegions(config.customSelector);
+      if (custom.length) return custom;
+    }
+    return state.annotator.findRegions("lyrics");
+  }
+
   function buildRegions() {
     if (!state.annotator) return [];
+
+    // 歌词走浮层：DOM 注音这一路一个歌词元素都不要碰
+    if (useOverlayForLyrics()) {
+      return config.annotateAll === false ? [] : state.annotator.findRegions("titles");
+    }
+
     // 自定义选择器优先；匹配不到就退回下面的模式
     if (config.scope === "custom" && config.customSelector) {
       var custom = state.annotator.customRegions(config.customSelector);
       if (custom.length) return custom;
       log("自定义选择器没匹配到元素，回退自动模式");
     }
-    // 默认：只标播放栏的歌曲名/歌手。
-    // 歌词行的 DOM 由网易云和别的歌词插件高频重建，注音进去会被反复丢掉，
-    // 追着重注就会抽搐，所以歌词默认不开，需要的人自己去设置里打开。
+    // 只标播放栏的歌曲名/歌手
     if (config.scope === "titles") {
-      return config.annotateAll === false
-        ? []
-        : state.annotator.findRegions("titles");
+      return config.annotateAll === false ? [] : state.annotator.findRegions("titles");
     }
-    // 只标歌词
+    // 只标歌词（inline 渲染）
     if (config.scope === "lyrics") return state.annotator.findRegions("lyrics");
-    // 全都标
+    // 全都标（inline 渲染）
     return state.annotator.findRegions("safe");
+  }
+
+  /** 浮层的可见性跟着设置走 */
+  function syncOverlay() {
+    if (!state.overlay) return;
+    if (!config.enabled || !useOverlayForLyrics()) {
+      state.overlay.stop();
+      return;
+    }
+    state.overlay.start(lyricRegions);
   }
 
   function pass() {
@@ -317,6 +359,7 @@
       state.applied = true;
       startObserver();
     }
+    syncOverlay();
     schedule(0);
   }
 
@@ -327,11 +370,13 @@
       state.timer = null;
     }
     if (state.annotator) state.annotator.restoreAll();
+    if (state.overlay) state.overlay.stop();
   }
 
   function rescan() {
     if (state.annotator) state.annotator.restoreAll();
     if (state.translator) state.translator.retryMisses();
+    syncOverlay();
     schedule(0);
   }
 
@@ -386,6 +431,12 @@
       '<div class="kt-hint">歌词行的 DOM 会被网易云和别的歌词插件高频重建，注音可能被反复丢掉。' +
       "插件会自动放弃「一直在变」的行（宁可少标也不闪）。如果你发现歌词抽搐，就是这个原因——" +
       "把它切回「只标播放栏」即可。</div>" +
+      '<div class="kt-row"><label>歌词渲染方式 <select data-k="lyricRender">' +
+      '<option value="overlay">浮层（推荐，不碰歌词 DOM，可与振假名插件共存）</option>' +
+      '<option value="inline">直接写进歌词行（排版更准，但会和振假名插件互相打架）</option>' +
+      "</select></label></div>" +
+      '<div class="kt-hint">「浮层」把英文画在歌词上方，歌词 DOM 一个字节都不改，' +
+      "所以 jp-furigana 这类会重建歌词行的插件不会把它抹掉；代价是注音不参与排版（换行/缩放时可能略有偏差）。</div>" +
       '<div class="kt-row"><label>自定义选择器 <input type="text" data-k="customSelector" placeholder="例如 ul.lyric > li"></label></div>' +
       '<div class="kt-hint">选择器留空或匹配不到元素时会自动回退。</div>' +
       "<h3>操作</h3>" +
@@ -452,6 +503,11 @@
       lines.push("BetterNCM: " + (state.betterncmVersion || "未知"));
       lines.push("离线词典: " + (typeof KTDict !== "undefined" ? KTDict.count : "未加载") + " 条");
       lines.push("已注音节点: " + (state.annotator ? state.annotator.injectedCount() : 0));
+      if (state.overlay) {
+        lines.push(
+          "浮层: " + (state.overlay.isRunning() ? "运行中" : "未启用") + "，标签 " + state.overlay.labelCount() + " 个"
+        );
+      }
       lines.push("上一轮: " + state.lastPassMs + "ms " + JSON.stringify(state.lastResult || {}));
       if (s) {
         lines.push(
@@ -474,7 +530,7 @@
       if (status) status.style.display = "none";
     }
 
-    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector"];
+    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector", "lyricRender"];
     var NEEDS_RESTYLE = ["rtSize", "rtOpacity", "focusDebug"];
 
     var inputs = root.querySelectorAll("[data-k]");
@@ -680,6 +736,19 @@
           trace("annotate", Array.prototype.join.call(arguments, " "));
         },
       });
+      // 歌词用的浮层渲染器：不碰歌词 DOM，因此能和 jp-furigana 共存
+      if (typeof KTOverlay !== "undefined" && KTOverlay.createOverlay) {
+        state.overlay = KTOverlay.createOverlay({
+          lookup: function (word) {
+            return state.translator.lookup(word);
+          },
+          rtSize: config.rtSize,
+          rtOpacity: config.rtOpacity,
+          log: function () {
+            trace("overlay", Array.prototype.join.call(arguments, " "));
+          },
+        });
+      }
     } catch (e) {
       state.error = (e && e.message) || String(e);
       warn("初始化失败", e);
@@ -724,6 +793,11 @@
       },
       rubyLayout: function () {
         return KTAnnotate.hasRubyLayout(document);
+      },
+      overlay: function () {
+        return state.overlay
+          ? { running: state.overlay.isRunning(), labels: state.overlay.labelCount() }
+          : null;
       },
     };
 

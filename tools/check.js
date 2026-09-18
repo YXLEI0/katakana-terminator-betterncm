@@ -87,6 +87,7 @@ console.log("[0/7] 运行时版本");
   const TEST_FILES = [
     "tests/matcher.test.js",
     "tests/annotate.test.js",
+    "tests/overlay.test.js",
     "tests/translate.test.js",
     "tests/integration.test.js",
   ];
@@ -151,7 +152,14 @@ if (manifest) {
 // ---------------------------------------------------------------- 3. 注入清单
 
 console.log("[3/7] 注入清单");
-const WANT_ORDER = ["core/matcher.js", "core/dict.js", "core/translate.js", "core/annotate.js", "main.js"];
+const WANT_ORDER = [
+  "core/matcher.js",
+  "core/dict.js",
+  "core/translate.js",
+  "core/annotate.js",
+  "core/overlay.js",
+  "main.js",
+];
 if (manifest && manifest.injects && manifest.injects.Main) {
   const files = manifest.injects.Main.map((i) => i.file);
   for (const f of files) {

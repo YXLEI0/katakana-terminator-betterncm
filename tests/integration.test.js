@@ -16,6 +16,7 @@ const FILES = [
   "core/dict.js",
   "core/translate.js",
   "core/annotate.js",
+  "core/overlay.js",
   "main.js",
 ];
 
@@ -148,22 +149,36 @@ test("注入 5 个文件后，插件注册了 onLoad / onConfig", async () => {
   assert.strictEqual(env.api, env.window.KatakanaTerminator);
 });
 
-test("默认只标播放栏，不碰歌词（歌词默认关，避免抽搐）", async () => {
+test("默认：歌词走浮层（不碰歌词 DOM），播放栏走 DOM 注音", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(500);
 
-  // 播放栏被标注
+  // 播放栏用 DOM 注音
   assert.ok(env.document.querySelectorAll(".m-playbar ruby.kt-ruby").length > 0, "播放栏应该被标注");
-  // 歌词不动 —— 歌词行 DOM 会被高频重建，默认不碰
-  assert.strictEqual(env.document.querySelectorAll("ul.lyric ruby.kt-ruby").length, 0, "默认不该标歌词");
-  assert.strictEqual(env.api.config.scope, "titles");
+  // 歌词：DOM 里绝不能有我们的注音（这样 jp-furigana 才不会被触发重建）
+  assert.strictEqual(env.document.querySelectorAll("ul.lyric ruby.kt-ruby").length, 0, "歌词 DOM 不该被改");
+  assert.strictEqual(env.document.querySelectorAll("ul.lyric [data-kt-region]").length, 0, "歌词不该有区域标记");
+  // 浮层应该已经建起来并在跑
+  assert.ok(env.document.getElementById("katakana-terminator-overlay"), "浮层容器应该存在");
+  assert.strictEqual(env.api.config.lyricRender, "overlay");
+  assert.strictEqual(env.api.config.scope, "all");
 });
 
-test("把范围切成「只标歌词」后，歌词会被标注", async () => {
+test("歌词 DOM 在浮层模式下逐字节不变（jp-furigana 共存的前提）", async () => {
+  const env = bootPlugin(NCM_HTML);
+  await env.runLoad();
+  const before = env.document.querySelector("ul.lyric").innerHTML;
+  await sleep(600);
+  assert.strictEqual(env.document.querySelector("ul.lyric").innerHTML, before, "歌词容器必须一字不变");
+});
+
+test("把范围切成「只标歌词」+ inline 后，歌词会被 DOM 注音", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(300);
+  // 这里要验证的是「直接写进歌词行」那条路，所以显式切到 inline
+  env.api.set("lyricRender", "inline");
   env.api.set("scope", "lyrics");
   await sleep(500);
 
@@ -199,10 +214,11 @@ test("关掉「标注播放栏」后播放栏不再被标注", async () => {
   await env.runLoad();
   await sleep(400);
   assert.ok(rubyCount(env.document.querySelector(".m-playbar")) > 0, "先确认播放栏已被标注");
-  env.api.set("annotateAll", false);
-  await sleep(500);
+  env.api.set("lyricRender", "inline");
+  env.api.set("scope", "lyrics"); // 只标歌词 -> 播放栏不再走 DOM 注音
+  await sleep(600);
 
-  assert.strictEqual(rubyCount(env.document.querySelector(".m-playbar")), 0, "关掉后播放栏不该被标注");
+  assert.strictEqual(rubyCount(env.document.querySelector(".m-playbar")), 0, "切到只标歌词后，播放栏不该被标注");
 });
 
 test("禁用后 DOM 完全还原，重新启用后又能标注", async () => {
@@ -227,7 +243,8 @@ test("断网时依然能用离线词典标注", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(400);
-  env.api.set("scope", "lyrics"); // 歌词默认关，这里显式打开来验证离线词典
+  env.api.set("lyricRender", "inline"); // 这里验证的是 DOM 注音这条路
+  env.api.set("scope", "lyrics");
   await sleep(600);
   // fetch 全程失败，但词典命中的词照样标上
   const rt = env.document.querySelector("ul.lyric li p ruby.kt-ruby .kt-rt");

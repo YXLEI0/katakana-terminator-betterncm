@@ -27,13 +27,14 @@ const SRC_FILES = [
   "core/dict.js",
   "core/translate.js",
   "core/annotate.js",
+  "core/overlay.js",
   "main.js",
   "preview.png",
 ];
 
 // src/ 下允许存在的全部内容（多出来说明有临时文件误提交）
 const ALLOWED_TOP = new Set(["manifest.json", "main.js", "preview.png", "core"]);
-const ALLOWED_CORE = new Set(["matcher.js", "dict.js", "translate.js", "annotate.js"]);
+const ALLOWED_CORE = new Set(["matcher.js", "dict.js", "translate.js", "annotate.js", "overlay.js"]);
 
 // ---------------------------------------------------------------- zip
 
