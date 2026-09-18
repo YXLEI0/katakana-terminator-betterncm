@@ -20,7 +20,7 @@
   var LOG = "[katakana-terminator]";
   var CONFIG_KEY = "katakana-terminator.config";
   var CONFIG_VERSION = 1;
-  var REPO_URL = "https://github.com/OWNER/katakana-terminator-betterncm";
+  var REPO_URL = "https://github.com/YXLEI0/katakana-terminator-betterncm";
 
   var DEFAULTS = {
     enabled: true,

@@ -1,5 +1,7 @@
 # 第三方组件与数据来源
 
+本插件由 **YXLEI0** 移植维护：https://github.com/YXLEI0/katakana-terminator-betterncm
+
 本插件**没有**打包任何第三方运行时库（不需要 kuromoji、不需要分词词典）。
 分发的文件只有本仓库 `src/` 下的代码、一份生成的词典和一张预览图。
 

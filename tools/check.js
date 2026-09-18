@@ -135,19 +135,37 @@ if (dict) {
   if (dict.count !== keys.length) fail(`dict.count(${dict.count}) 与实际条目数(${keys.length}) 不一致`);
 }
 
-// ---------------------------------------------------------------- 5. 占位符
+// ---------------------------------------------------------------- 5. 元信息一致性
 
-console.log("[5/6] 占位符检查");
-const srcText = {};
+console.log("[5/6] 元信息与仓库地址");
+const MANIFEST = manifest || {};
+const EXPECTED_OWNER = "YXLEI0";
+const EXPECTED_REPO = "katakana-terminator-betterncm";
+if (MANIFEST.author && MANIFEST.author !== EXPECTED_OWNER) {
+  warn(`manifest.author 是「${MANIFEST.author}」，与预期维护者（${EXPECTED_OWNER}）不一致`);
+}
+if (!MANIFEST.author_link) warn("manifest.author_link 为空，商店里不会显示作者主页");
+const mainSrc = fs.readFileSync(path.join(SRC, "main.js"), "utf8");
+const repoUrl = /var REPO_URL = "([^"]+)"/.exec(mainSrc);
+if (!repoUrl) {
+  fail("main.js 里找不到 REPO_URL");
+} else {
+  const url = repoUrl[1];
+  const want = `https://github.com/${EXPECTED_OWNER}/${EXPECTED_REPO}`;
+  if (url !== want) fail(`main.js 的 REPO_URL 不对：\n         实际 ${url}\n         应为 ${want}`);
+  else ok("main.js 的 REPO_URL 与仓库一致");
+  if (/OWNER/.test(url)) fail("REPO_URL 里还有 OWNER 占位符");
+}
+let placeholders = 0;
 for (const f of walk(SRC)) {
-  if (f.endsWith(".js") || f.endsWith(".json")) srcText[path.relative(ROOT, f)] = fs.readFileSync(f, "utf8");
+  if (!f.endsWith(".js") && !f.endsWith(".json")) continue;
+  const n = (fs.readFileSync(f, "utf8").match(/OWNER/g) || []).length;
+  if (n) {
+    fail(`${path.relative(ROOT, f)} 里还有 ${n} 处 OWNER 占位符`);
+    placeholders += n;
+  }
 }
-for (const [rel, text] of Object.entries(srcText)) {
-  const owners = text.match(/OWNER/g);
-  if (owners) warn(`${rel} 里有 ${owners.length} 处 OWNER 占位符（发布前替换成你的 GitHub 用户名）`);
-  if (/TODO|FIXME/.test(text)) warn(`${rel} 里有 TODO/FIXME`);
-}
-if (!warnings) ok("没有发现占位符");
+if (!placeholders) ok("没有残留的 OWNER 占位符");
 
 // ---------------------------------------------------------------- 6. 秘密信息
 
