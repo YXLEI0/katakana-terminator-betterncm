@@ -1,5 +1,57 @@
 # 更新记录
 
+## 1.2.0
+
+**支持「同一行歌词里，汉字有振假名 + 片假名有英文」。** 需要给 jp-furigana 打补丁。
+
+先把机制说清楚（用它的真实代码 + 真实 DOM 结构实测出来的）：
+
+我原本以为冲突来自 `isClean()` 里的 `h.childNodes.length !== 1`。**实测发现不是**——
+在"jp-furigana 已注音、我们插了 ruby"的场景下：
+
+| | `isClean()` | `restore()` 后我们的注音 |
+| --- | --- | --- |
+| 未打补丁 | `true` | **0 个（被丢掉）** |
+| 已打补丁 | `true` | **1 个（保住）** |
+
+抹掉我们注音的真正原因是 `restore()`：
+
+```js
+const wrap = host.__fgWrap;
+if (wrap && wrap.parentNode === host) wrap.remove();   // ← 我们的节点挂在 wrap 里，一起被扔了
+```
+
+它每次处理该行都会先 `restoreLine()`，所以我们的注音每轮都被丢掉一次。
+
+另外实测到一件好事：我们改写的是它留着的原文本节点（只切短、不删除），
+所以它算出来的「看得见的原文」`hostsText()` 一个字符都没变 ——
+注解前后它读到的都是 `取戻したい　ヒーローみたいに`。
+
+补丁做两件事（`tools/patch-jp-furigana.js`）：
+
+1. `restore()`：拆 wrap 前，把我们挂在它 wrap 里的注音节点先搬到 host 上，
+   免得跟着一起被丢掉（它随后重建 wrap 时会用 `include` 把 host 的全部子节点
+   搬进新 wrap，我们的节点也跟着进新 wrap）；
+2. `isClean()`：子节点计数忽略我们插的节点，作为纵深防御。
+
+用法：
+
+```bash
+node tools/patch-jp-furigana.js           # 打补丁（自动备份 main.js.kt-bak）
+node tools/patch-jp-furigana.js --check   # 看状态
+node tools/patch-jp-furigana.js --revert  # 还原
+```
+
+补丁前会做语法自检，语法不过就中止且不改文件。锚点找不到会明确报出来，
+不会打一半。
+
+插件侧新增设置项 `coexistWithFurigana`（默认关）。打开它并且该行确认被
+jp-furigana 接管时，含汉字的行也会注音；没打补丁时遇到它管的行仍然让开。
+
+**注意**：jp-furigana 更新后补丁会丢失，重新跑一次脚本即可。
+
+测试 71 个全过。
+
 ## 1.1.1
 
 按「各管各的元素」重做与 jp-furigana 的共存（不再依赖浮层）。

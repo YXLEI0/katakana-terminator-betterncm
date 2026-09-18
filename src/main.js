@@ -30,9 +30,11 @@
     // 歌词用浮层是因为 jp-furigana 这类插件会重建歌词行，往里插节点必被抹掉。
     scope: "all", // titles | lyrics | all | custom
     customSelector: "",
-    // 歌词用「直接写进歌词行」渲染（方案 A）：含汉字的行整个让给振假名插件，
-    // 纯假名行归我们，两边不碰同一个元素。想换成浮层可以在这里改，见设置面板。
+    // 歌词用「直接写进歌词行」渲染：含汉字的行让给振假名插件，纯假名行归我们。
+    // 若给 jp-furigana 打了共存补丁（tools/patch-jp-furigana.js），
+    // 打开 coexistWithFurigana 就能在同一行上两种注音并存。
     lyricRender: "inline",
+    coexistWithFurigana: false, // 需要先给 jp-furigana 打补丁，见设置面板说明
     rtSize: 60, // 注音字号（相对底字百分比）
     rtOpacity: 80, // 注音不透明度
     focusDebug: false, // 给已注音区域描边，用来排障
@@ -436,6 +438,12 @@
       "</select></label></div>" +
       '<div class="kt-hint">「浮层」把英文画在歌词上方，歌词 DOM 一个字节都不改，' +
       "所以 jp-furigana 这类会重建歌词行的插件不会把它抹掉；代价是注音不参与排版（换行/缩放时可能略有偏差）。</div>" +
+      '<div class="kt-row"><label><input type="checkbox" data-k="coexistWithFurigana"> ' +
+      "与振假名插件共用同一行（需先给 jp-furigana 打补丁）</label></div>" +
+      '<div class="kt-hint">默认情况下含汉字的歌词行整个让给 jp-furigana，' +
+      "所以那种行里的片假名标不上英文。给 jp-furigana 打上共存补丁" +
+      "（<code>node tools/patch-jp-furigana.js</code>）后打开这个开关，" +
+      "含汉字的行也能两种注音并存。</div>" +
       '<div class="kt-row"><label>自定义选择器 <input type="text" data-k="customSelector" placeholder="例如 ul.lyric > li"></label></div>' +
       '<div class="kt-hint">选择器留空或匹配不到元素时会自动回退。</div>' +
       "<h3>操作</h3>" +
@@ -529,7 +537,7 @@
       if (status) status.style.display = "none";
     }
 
-    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector", "lyricRender"];
+    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector", "lyricRender", "coexistWithFurigana"];
     var NEEDS_RESTYLE = ["rtSize", "rtOpacity", "focusDebug"];
 
     var inputs = root.querySelectorAll("[data-k]");
@@ -736,6 +744,8 @@
         skipKanjiLines: function () {
           return !useOverlayForLyrics();
         },
+        // 打了共存补丁后才允许在含汉字的行上也注音（两种注音同一行）
+        coexistWithFurigana: !!config.coexistWithFurigana,
         log: function () {
           // 走 trace：注音明细只在出问题时才有价值，默认不进 console，但一定要留痕
           trace("annotate", Array.prototype.join.call(arguments, " "));

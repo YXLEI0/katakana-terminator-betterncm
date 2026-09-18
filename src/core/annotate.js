@@ -100,6 +100,10 @@
     function shouldSkipKanjiLines() {
       return typeof skipKanjiLinesOption === "function" ? !!skipKanjiLinesOption() : !!skipKanjiLinesOption;
     }
+
+    // 装了共存补丁时，含汉字的歌词行也可以标（两种注音同一行）。
+    // 默认 false：没打补丁的 jp-furigana 会重建整行，硬标只会互相打架。
+    var coexistWithFurigana = options.coexistWithFurigana === true;
     // 记录我们改过的文本节点： node -> { host, nodes, plain, region }
     var records = new Map();
 
@@ -440,6 +444,22 @@
       return matcher.hasKanji(out);
     }
 
+    /**
+     * 这一行是不是「被振假名插件（jp-furigana）接管了」。
+     *
+     * 判据用它的标记：fg-line / fg-ruby / data-fg-* / __fgWrap。
+     * 打了共存补丁之后，它会容忍我们插进它 wrap 的节点、不再重建整行，
+     * 这时两种注音可以同处一行 —— 见 docs/jp-furigana-coexist.patch。
+     */
+    function isFuriganaManaged(el) {
+      for (var p = el; p && p !== doc.body; p = p.parentElement) {
+        var cn = typeof p.className === "string" ? p.className : "";
+        if (/fg-line|fg-ruby|fg-word/.test(cn)) return true;
+        if (p.__fgWrap || p.__fgText != null) return true;
+      }
+      return false;
+    }
+
     /** 摘掉我们插进去的所有节点（注音 + 文本分段） */
     function removeInjected(rec) {
       for (var i = 0; i < rec.nodes.length; i++) {
@@ -759,7 +779,14 @@
             if (lineEl.tagName === "LI" || /\bline\b|lyric-line/.test(cn)) break;
             lineEl = lineEl.parentNode;
           }
-          if (lineEl && lineEl.nodeType === 1 && lineHasKanji(lineEl)) {
+          // 例外：装了共存补丁的 jp-furigana 能容忍我们，含汉字的行也照标。
+          // 判据是它自己的标记；没打补丁时遇到它管的行仍然让开（否则互相重建）。
+          if (
+            lineEl &&
+            lineEl.nodeType === 1 &&
+            lineHasKanji(lineEl) &&
+            !(coexistWithFurigana && isFuriganaManaged(lineEl))
+          ) {
             kanjiSkipped++;
             continue;
           }
