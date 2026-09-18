@@ -25,7 +25,7 @@
   var DEFAULTS = {
     enabled: true,
     online: true, // 词典没有的词是否联网翻译
-    annotateAll: true, // 除歌词外，也标标题/歌手/专辑/列表
+    annotateAll: true, // 除歌词外是否也标播放栏的歌曲名/歌手（白名单，绝不含整页）
     scope: "auto", // auto | lyrics | custom
     customSelector: "",
     rtSize: 60, // 注音字号（相对底字百分比）
@@ -185,16 +185,14 @@
       if (custom.length) return custom;
       log("自定义选择器没匹配到元素，回退自动模式");
     }
-    // 「只标歌词」：只找歌词容器；一个都没有时退回整页，免得什么都不标
-    if (config.scope === "lyrics") {
-      var lyrics = state.annotator.findRegions(true);
-      if (lyrics.length) return lyrics;
-      return state.annotator.findRegions(false);
+    // 只标歌词
+    if (config.scope === "lyrics" || config.annotateAll === false) {
+      return state.annotator.findRegions("lyrics");
     }
-    // 自动：annotateAll 决定是整页（含标题/歌手/列表）还是只标歌词
-    if (config.annotateAll !== false) return state.annotator.findRegions(false);
-    var onlyLyrics = state.annotator.findRegions(true);
-    return onlyLyrics.length ? onlyLyrics : state.annotator.findRegions(false);
+    // 默认：歌词 + 标题/歌手白名单。
+    // 注意这里绝不返回 document.body —— 早期版本用整页当区域，把侧边栏、
+    // 搜索框、歌单名全改了，直接把网易云干到错误页。
+    return state.annotator.findRegions("safe");
   }
 
   function pass() {
@@ -220,12 +218,23 @@
       state.error = (e && e.message) || String(e);
       trace("pass-ERROR", state.error + " @ " + ((e && e.stack) || "").slice(0, 400));
       warn("扫描失败", e);
+      // 连续出错就自动停手：宁可插件不工作，也不能把宿主页面拖垮。
+      state.consecutiveErrors = (state.consecutiveErrors || 0) + 1;
+      if (state.consecutiveErrors >= 5) {
+        warn("连续 " + state.consecutiveErrors + " 轮扫描出错，自动停用并还原 DOM。");
+        trace("circuit-breaker", "连续出错 " + state.consecutiveErrors + " 次，已自动停用");
+        config.enabled = false;
+        saveConfig();
+        disable();
+        return;
+      }
     } finally {
       // MutationObserver 的回调在本轮同步任务之后才跑，光靠标志位挡不住
       // 我们自己造成的变更；把记录队列清空，否则会自激成死循环。
       if (state.observer) state.observer.takeRecords();
       state.lastPassMs = Math.round(performance.now() - t0);
     }
+    state.consecutiveErrors = 0;
   }
 
   /** 合并短时间内的多次触发，最多排一个待执行的 pass */
@@ -329,7 +338,9 @@
       "<h3>开关</h3>" +
       '<div class="kt-row"><label><input type="checkbox" data-k="enabled"> 启用片假名注音</label></div>' +
       '<div class="kt-row"><label><input type="checkbox" data-k="online"> 词典没有的词联网翻译（关掉则完全离线）</label></div>' +
-      '<div class="kt-row"><label><input type="checkbox" data-k="annotateAll"> 除歌词外也标注标题 / 歌手 / 专辑</label></div>' +
+      '<div class="kt-row"><label><input type="checkbox" data-k="annotateAll"> 除歌词外，也标注播放栏的歌曲名 / 歌手</label></div>' +
+      '<div class="kt-hint">出于稳定考虑，插件只处理歌词容器和播放栏的标题——不会扫描整个页面。' +
+      "早期版本扫整页会把侧边栏、搜索框、歌单名一起改掉，导致网易云报「应用出错了」。</div>" +
       "<h3>外观</h3>" +
       '<div class="kt-row"><label>注音字号 <input type="range" data-k="rtSize" min="30" max="120" step="1"> <span data-v="rtSize"></span></label></div>' +
       '<div class="kt-row"><label>注音不透明度 <input type="range" data-k="rtOpacity" min="10" max="100" step="1"> <span data-v="rtOpacity"></span></label></div>' +

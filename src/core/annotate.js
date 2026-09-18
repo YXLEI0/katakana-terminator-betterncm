@@ -81,8 +81,7 @@
     var lookup = options.lookup;
     if (typeof lookup !== "function") throw new Error("createAnnotator 需要 lookup(word) 函数");
 
-    var annotateAll = options.annotateAll !== false; // false = 只标歌词区域
-
+    var annotateAll = options.annotateAll !== false; // false = 只标歌词
     // 记录我们改过的文本节点： node -> { host, nodes, plain, region }
     var records = new Map();
 
@@ -103,6 +102,26 @@
       'div[class^="lyric-bar-inner"] div[class^="rnp-lyrics-line"]',
       'div[class^="lyricMainLine"]',
       'div[class*="lyric-line"]',
+    ];
+
+    /*
+     * 标题/歌手等「顺带标注」的容器白名单。
+     *
+     * 这里刻意不用 body —— 早期版本用 body 当区域，结果把侧边栏、搜索框、
+     * 歌单名、评论正文全都改了，直接把网易云干到错误页（有运行轨迹为证：
+     * 一轮 pass 里 changed=8，命中的全是 BODY 下的各种文字）。
+     * 只碰这些语义明确、内容稳定的容器，宁可漏标也不要越界。
+     */
+    var TARGET_SELECTORS = [
+      ".m-playbar .words .name",
+      ".m-playbar .words .by",
+      '[class*="playbar"] [class*="songName"]',
+      '[class*="playbar"] [class*="artist"]',
+      '[class*="nowPlaying"] [class*="title"]',
+      '[class*="nowPlaying"] [class*="artist"]',
+      '[class*="songTitle"]',
+      '[class*="songName"]',
+      '[class*="artistName"]',
     ];
 
     function isSkippable(el) {
@@ -389,31 +408,22 @@
     }
 
     /**
-     * 找出要处理的区域。
-     *   onlyLyrics=true  -> 只找歌词容器（找不到就返回空数组，交给上层决定回退）
-     *   onlyLyrics=false -> 整页 body，歌词自然也包含在内
-     *
-     * 为什么要分开：之前这里先找歌词、找到就返回，导致「标注全部」这个开关
-     * 实际失效 —— 只要页面上有歌词，标题/歌手就永远轮不到。现在由调用方
-     * 按用户设置决定要哪一种。
+     * 按一组选择器收集元素，去掉互相包含的重复项。
+     * 选择器写错不会抛异常（用户自定义选择器可能非法）。
      */
-    function findRegions(onlyLyrics) {
-      if (!doc || !doc.body) return [];
-      if (!onlyLyrics) return [doc.body];
-
+    function collectBySelectors(selectors) {
       var regions = [];
       var seen = [];
-      for (var i = 0; i < LYRIC_SELECTORS.length; i++) {
+      for (var i = 0; i < selectors.length; i++) {
         var found;
         try {
-          found = doc.querySelectorAll(LYRIC_SELECTORS[i]);
+          found = doc.querySelectorAll(selectors[i]);
         } catch (e) {
           continue;
         }
         for (var j = 0; j < found.length; j++) {
           var el = found[j];
           if (!el.isConnected) continue;
-          // 去掉被别的已选区域包含的元素，避免重复扫
           var covered = false;
           for (var s = 0; s < seen.length; s++) {
             if (seen[s].contains(el)) {
@@ -427,6 +437,23 @@
         }
       }
       return regions;
+    }
+
+    /**
+     * 找出要处理的区域。
+     *
+     *   "lyrics" —— 只找歌词容器；找不到返回空数组，由上层决定是否回退
+     *   "safe"   —— 歌词 + 标题/歌手白名单（默认，绝不含 body）
+     *
+     * 为什么没有"整页 body"这个模式：实测它会把侧边栏/搜索框/歌单名全改了，
+     * 直接把应用干崩（见 TARGET_SELECTORS 上面的注释）。宁可少标，不可越界。
+     */
+    function findRegions(mode) {
+      if (!doc || !doc.body) return [];
+      if (mode === "safe") {
+        return collectBySelectors(LYRIC_SELECTORS.concat(TARGET_SELECTORS));
+      }
+      return collectBySelectors(LYRIC_SELECTORS);
     }
 
     // 用户传来的 CSS 选择器可能非法，非法时返回空数组而不是抛异常
@@ -464,7 +491,7 @@
         restored++;
       }
 
-      var list = regions && regions.length ? regions : findRegions(false);
+      var list = regions && regions.length ? regions : findRegions("safe");
       if (!list.length) return { scanned: 0, changed: 0, restored: restored };
 
       var changed = 0;

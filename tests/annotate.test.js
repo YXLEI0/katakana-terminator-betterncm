@@ -169,13 +169,14 @@ test("样式表可以注入并按设置更新", () => {
   assert.strictEqual(ctx.document.querySelectorAll("#katakana-terminator-style").length, 1);
 });
 
-test("annotateAll=false 只标歌词，true 连标题一起标", () => {
+test("annotateAll=false 只标歌词，true 走白名单（不含整页）", () => {
   const html = `<!doctype html><html><body>
     <div class="title">コーヒー</div>
-    <ul class="lyric"><li><p>ギター</p></li></ul>
+    <div class="m-playbar"><div class="words"><span class="name">ギター</span></div></div>
+    <ul class="lyric"><li><p>ピアノ</p></li></ul>
   </body></html>`;
 
-  // 只标歌词：标题不动
+  // 只标歌词：标题、播放栏都不动
   const ctx1 = loadCore(html);
   forceRubyLayout(ctx1, true);
   const lyricsOnly = ctx1.KTAnnotate.createAnnotator({
@@ -183,12 +184,12 @@ test("annotateAll=false 只标歌词，true 连标题一起标", () => {
     lookup: ctx1.translator.lookup,
     annotateAll: false,
   });
-  // 只标歌词：把区域限死在歌词容器上
-  lyricsOnly.pass(lyricsOnly.findRegions(true));
+  lyricsOnly.pass(lyricsOnly.findRegions("lyrics"));
   assert.strictEqual(ctx1.document.querySelectorAll(".title ruby").length, 0, "标题不该被标注");
+  assert.strictEqual(ctx1.document.querySelectorAll(".m-playbar ruby").length, 0, "播放栏不该被标注");
   assert.strictEqual(ctx1.document.querySelectorAll("ul.lyric ruby").length, 1);
 
-  // 标注全部：整页都扫，标题也要标上
+  // 标注全部：歌词 + 播放栏标题，但白名单外的 .title 仍然不碰
   const ctx2 = loadCore(html);
   forceRubyLayout(ctx2, true);
   const everything = ctx2.KTAnnotate.createAnnotator({
@@ -197,8 +198,38 @@ test("annotateAll=false 只标歌词，true 连标题一起标", () => {
     annotateAll: true,
   });
   everything.pass();
-  assert.strictEqual(ctx2.document.querySelectorAll(".title ruby").length, 1, "标题应该被标注");
+  assert.strictEqual(ctx2.document.querySelectorAll(".m-playbar ruby").length, 1, "播放栏标题应该被标注");
   assert.strictEqual(ctx2.document.querySelectorAll("ul.lyric ruby").length, 1);
+  assert.strictEqual(ctx2.document.querySelectorAll(".title ruby").length, 0, "白名单外的元素不该被标注");
+});
+
+test("绝不把整个 body 当区域（这是把网易云干崩的原因）", () => {
+  const html = `<!doctype html><html><body>
+    <nav class="m-sidebar">ミク</nav>
+    <input placeholder="カラオケ" value="">
+    <div class="m-playbar"><div class="words"><span class="name">コーヒー</span></div></div>
+    <ul class="lyric"><li><p>ギター</p></li></ul>
+  </body></html>`;
+  const ctx = loadCore(html);
+  forceRubyLayout(ctx, true);
+  const ann = ctx.KTAnnotate.createAnnotator({
+    document: ctx.document,
+    lookup: ctx.translator.lookup,
+    annotateAll: true,
+  });
+
+  for (const mode of ["lyrics", "safe"]) {
+    const regions = ann.findRegions(mode);
+    assert.ok(regions.length > 0, `${mode} 应该有区域`);
+    for (const r of regions) assert.notStrictEqual(r, ctx.document.body, `${mode} 不允许返回 body`);
+  }
+
+  // 侧边栏里的片假名必须原样不动
+  ann.pass();
+  assert.strictEqual(ctx.document.querySelectorAll(".m-sidebar ruby").length, 0, "侧边栏不该被标注");
+  assert.strictEqual(ctx.document.querySelector(".m-sidebar").textContent, "ミク");
+  assert.strictEqual(ctx.document.querySelectorAll(".m-playbar ruby").length, 1);
+  assert.strictEqual(ctx.document.querySelectorAll("ul.lyric ruby").length, 1);
 });
 
 test("词典里没有的词不会被注音（并进入待翻译状态）", () => {

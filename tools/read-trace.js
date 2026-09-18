@@ -1,115 +1,80 @@
 /*
- * 从网易云的 Local Storage 里把插件的运行轨迹读出来。
- *
- * 背景：插件把每次扫描、注音明细和异常都写进 localStorage['katakana-terminator.trace']。
- * 出问题时渲染进程的 console 不一定方便看，但这份轨迹会落盘在
- * %LOCALAPPDATA%\Netease\CloudMusic\webapp91x64\Local Storage\leveldb 里，
- * 这个脚本直接把它解出来。
- *
- *   node tools/read-trace.js
- *
- * 只读，不修改任何东西。
+ * 从网易云 Local Storage 的 leveldb 里读插件轨迹，逐文件处理并且只解码命中区域，
+ * 避免一次性把大文件转成字符串（那会把进程搞崩，实测 STATUS_HEAP_CORRUPTION）。
  */
-"use strict";
-
 const fs = require("fs");
 const path = require("path");
 
-const KEY = "katakana-terminator.trace";
-const base = path.join(
-  process.env.LOCALAPPDATA || "",
-  "Netease",
-  "CloudMusic",
-  "webapp91x64",
-  "Local Storage",
-  "leveldb"
-);
-
-if (!fs.existsSync(base)) {
-  console.error("找不到 Local Storage 目录：\n  " + base);
-  process.exit(1);
-}
-
-// localStorage 在 leveldb 里是 "_<origin>\x00\x01<key>" -> value，
-// 值是 UTF-16LE 还是 UTF-8 取决于写入端（Chromium 用 UTF-16LE 存 value）。
-// 这里两种都试，找那种能解析出合法 JSON 数组的。
-function decodeCandidates(buf) {
-  const out = [];
-  // UTF-16LE
-  try {
-    const s = buf.toString("utf16le");
-    out.push(s);
-  } catch (e) {
-    /* ignore */
-  }
-  // UTF-8 / latin1
-  out.push(buf.toString("utf8"));
-  out.push(buf.toString("latin1"));
-  return out;
-}
+const base = path.join(process.env.LOCALAPPDATA, "Netease", "CloudMusic", "webapp91x64", "Local Storage", "leveldb");
+const KEY = Buffer.from("katakana-terminator.trace", "latin1");
 
 const files = fs
   .readdirSync(base)
-  .filter((f) => f.endsWith(".log") || f.endsWith(".ldb"))
-  .map((f) => path.join(base, f))
-  .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  .filter((f) => /\.(log|ldb)$/.test(f))
+  .map((f) => {
+    const full = path.join(base, f);
+    const st = fs.statSync(full);
+    return { f, full, mt: st.mtimeMs, size: st.size };
+  })
+  .sort((a, b) => b.mt - a.mt);
 
-let best = null;
-let bestLen = 0;
+let best = [];
 
-for (const file of files) {
-  const buf = fs.readFileSync(file);
-  for (const text of decodeCandidates(buf)) {
-    let idx = text.indexOf(KEY);
-    while (idx !== -1) {
-      // 键后面就是值，抓一段足够长的窗口，找最外层的 JSON 数组
-      const window = text.slice(idx + KEY.length, idx + KEY.length + 200000);
-      const start = window.indexOf("[");
-      if (start !== -1) {
-        // 括号配平，截出完整数组
-        let depth = 0;
-        let inStr = false;
-        let esc = false;
-        for (let i = start; i < window.length; i++) {
-          const ch = window[i];
-          if (inStr) {
-            if (esc) esc = false;
-            else if (ch === "\\") esc = true;
-            else if (ch === '"') inStr = false;
-            continue;
-          }
-          if (ch === '"') inStr = true;
-          else if (ch === "[") depth++;
-          else if (ch === "]") {
-            depth--;
-            if (depth === 0) {
-              const raw = window.slice(start, i + 1);
-              try {
-                const arr = JSON.parse(raw);
-                if (Array.isArray(arr) && arr.length > bestLen) {
-                  best = arr;
-                  bestLen = arr.length;
-                }
-              } catch (e) {
-                /* 这段不是完整 JSON，继续找 */
-              }
-              break;
+for (const x of files) {
+  let buf;
+  try {
+    buf = fs.readFileSync(x.full);
+  } catch (e) {
+    continue; // 客户端占用，跳过
+  }
+  let from = 0;
+  while (from < buf.length) {
+    const at = buf.indexOf(KEY, from);
+    if (at === -1) break;
+    from = at + KEY.length;
+    // value 前缀 \x00 之后是 UTF-16LE 正文；键名匹配结束点可能差 1~4 字节
+    for (let off = 0; off <= 4; off++) {
+      const s = at + KEY.length + off;
+      const e = Math.min(buf.length, s + 80000);
+      if (e - s < 16) continue;
+      const text = buf.slice(s, e).toString("utf16le");
+      const start = text.indexOf("[");
+      if (start === -1) continue;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (ch === "\\") esc = true;
+          else if (ch === '"') inStr = false;
+          continue;
+        }
+        if (ch === '"') inStr = true;
+        else if (ch === "[") depth++;
+        else if (ch === "]") {
+          depth--;
+          if (depth === 0) {
+            try {
+              const arr = JSON.parse(text.slice(start, i + 1));
+              if (Array.isArray(arr) && arr.length > best.length) best = arr;
+            } catch (e) {
+              /* ignore */
             }
+            break;
           }
         }
       }
-      idx = text.indexOf(KEY, idx + 1);
     }
   }
 }
 
-if (!best) {
-  console.log("没找到插件轨迹。可能原因：");
-  console.log("  1) 插件从未成功启动过（检查是否被紧急开关关掉了）");
-  console.log("  2) 客户端还没重新启动过，轨迹尚未落盘");
-  console.log("  3) leveldb 还在内存里没 flush —— 完全退出网易云后再试一次");
+if (!best.length) {
+  console.log("没解出轨迹。文件清单：");
+  for (const x of files.slice(0, 8)) console.log(`  ${x.f}  ${x.size}B  ${new Date(x.mt).toLocaleString()}`);
   process.exit(2);
 }
 
-console.log(`读到 ${best.length} 行轨迹（按时间顺序）：\n`);
-for (const line of best) console.log("  " + line);
+console.log(`# 轨迹 ${best.length} 行\n`);
+best.forEach((l, i) => console.log(String(i + 1).padStart(3) + "  " + l));
