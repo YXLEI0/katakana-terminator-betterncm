@@ -85,6 +85,22 @@
     // 记录我们改过的文本节点： node -> { host, nodes, plain, region }
     var records = new Map();
 
+    /*
+     * host 元素 -> 我们为它处理过的两种「可见原文」：{ plain, annotated }。
+     *
+     * 为什么需要它：React（以及 RefinedNowPlaying 这类插件）会把整行元素
+     * **内部子节点全部换新**，文字却一模一样。此时记录里的文本节点已经作废，
+     * 新文本节点没有记录，如果只看 records 就会把它当成"新的一行"重新注音 ——
+     * React 一重建我们就注一次，来回触发，永远不收敛。这就是真机轨迹里
+     * 「18 行每 250ms 重注一次」的原因。
+     *
+     * 记两种形态是因为 React 丢节点前后可见文本不同：
+     *   annotated = 注音在位时的可见底字（= 原文）
+     *   plain     = React 把我们插的节点丢掉后的可见底字（可能只剩前半截）
+     * 这两种都说明"这段内容我们已经处理过"，不该再动。
+     */
+    var decidedByHost = new WeakMap();
+
     // 不进去的标签
     var SKIP_TAGS = {
       SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1,
@@ -255,6 +271,15 @@
         kept: !leadIsRuby,
         index: index,
       });
+      // 记下"这个 host 的这段内容已经注过音了"，两种可见形态都记，
+      // 因为 React 丢掉我们插的节点前后，可见底字不一样。
+      // reAnnotated 表示这次是「补回来的第二次」，用来止住无限来回。
+      var prevDecision = decidedByHost.get(host);
+      decidedByHost.set(host, {
+        plain: text,
+        annotated: visibleText(host),
+        reAnnotated: !!(prevDecision && prevDecision.plain === text),
+      });
 
       if (options.log && records.size <= 12) {
         options.log(
@@ -333,6 +358,14 @@
       untagIfClean(host, rec.region);
     }
 
+    /** 我们插进去的注音节点是否还都挂在 DOM 上 */
+    function annotationsIntact(rec) {
+      for (var i = 0; i < rec.nodes.length; i++) {
+        if (!rec.nodes[i].isConnected) return false;
+      }
+      return rec.nodes.length > 0;
+    }
+
     /** 摘掉我们插进去的所有节点（注音 + 文本分段） */
     function removeInjected(rec) {
       for (var i = 0; i < rec.nodes.length; i++) {
@@ -388,6 +421,10 @@
         restoreRecord(node, rec);
       });
       records.clear();
+      // 同时清掉"这段内容处理过"的记忆。
+      // 否则用户手动禁用再启用（或改设置触发 rescan）后，插件会认为
+      // 「已经处理过、不用再动」，结果就是怎么都不再注音。
+      decidedByHost = new WeakMap();
       cleanup();
     }
 
@@ -464,7 +501,24 @@
       // 文本以片假名开头时原节点本来就被移除了，不能拿这个当失效依据
       // （否则每轮都会判定为馊了，变成一直闪）。
       if (rec.kept && node.parentNode !== host) return true;
-      return visibleText(host) !== rec.plain;
+      var now = visibleText(host);
+      if (now !== rec.plain) {
+        // 记下失败现场：到底算出什么、原文是什么、DOM 长什么样。
+        if (options.log) {
+          options.log(
+            "失效 plain=" +
+              JSON.stringify(rec.plain.slice(0, 50)) +
+              " now=" +
+              JSON.stringify(now.slice(0, 50)) +
+              " kept=" +
+              rec.kept +
+              " html=" +
+              JSON.stringify(String(host.innerHTML || "").slice(0, 160))
+          );
+        }
+        return true;
+      }
+      return false;
     }
 
     /**
@@ -590,6 +644,7 @@
       var candidates = collectTextNodes(list);
 
       var changed = 0;
+      var skipped = 0;
       for (var i = 0; i < candidates.length; i++) {
         var node = candidates[i];
         // 所属区域：可能是被包含的子区域，取文档顺序里第一个包含它的
@@ -602,14 +657,43 @@
         }
         if (!region.isConnected || !isVisible(region)) continue;
 
+        // 这个 host 我们注过音。判断当前这段可见内容属于哪种情况：
+        //   annotated —— 我们的注音还在，内容也没变 -> 什么都不用做
+        //   plain     —— React 把我们插的节点丢掉了，文字没变 -> 补一次（只补一次）
+        //   其它      —— 文字真的变了 -> 丢掉旧记录，重新注音
+        var hostEl = node.parentNode;
+        var visibleNow = hostEl ? visibleText(hostEl) : "";
+        var prior = hostEl ? decidedByHost.get(hostEl) : null;
+        if (prior) {
+          if (prior.annotated === visibleNow) {
+            skipped++;
+            continue; // 注音在位且内容没变，一个字节都不动
+          }
+          if (prior.plain === visibleNow) {
+            // React 丢掉了我们的节点。补一次；但如果补过还是被丢，
+            // 就不再补了 —— 那说明补注音这个动作本身会触发对方重建，
+            // 再补就是无限来回（真机上 18 行每 250ms 一次就是这么来的）。
+            if (prior.reAnnotated) {
+              skipped++;
+              continue;
+            }
+          }
+        }
+
         // 已经注过音的行：只有确认失效了才动它。
-        // 注意这里不能直接跳过 —— 上一版把「失效重做」放在循环外统一处理，
-        // 结果所有历史记录每轮都被还原一次（包括已经隐藏、根本不用管的行）。
         var rec = records.get(node);
         if (rec) {
           if (!isStale(rec, node)) continue; // 依然有效，一个字节都不动
-          restoreRecord(node, rec);
-          restored++;
+          // 失效了。但要注意：如果 React 已经把我们的节点丢掉/重建，
+          // 那 DOM 里已经没有我们的痕迹了，这时**不需要还原** ——
+          // 「还原」本身是一连串 DOM 变更（摘节点 + 写回文本），
+          // 在真机上就是可见的一闪。直接丢掉记录、往下重新注音即可。
+          if (annotationsIntact(rec)) {
+            restoreRecord(node, rec);
+            restored++;
+          } else {
+            records.delete(node);
+          }
         }
 
         // 每次重新读值：上面可能刚把原文写回来
@@ -652,7 +736,7 @@
           }
         }
       }
-      return { scanned: list.length, changed: changed, restored: restored };
+      return { scanned: list.length, changed: changed, restored: restored, skipped: skipped };
     }
 
     function injectedCount() {

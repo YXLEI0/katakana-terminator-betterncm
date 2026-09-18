@@ -210,10 +210,21 @@
       for (var ri = 0; ri < regions.length; ri++) if (regions[ri].isConnected) n++;
       state.lastResult = state.annotator.pass(regions);
       state.error = null;
-      trace(
-        "pass",
-        "regions=" + n + " changed=" + state.lastResult.changed + " restored=" + state.lastResult.restored
-      );
+      // 只在「真的做了什么」时记录。稳定状态下每 250ms 一条 pass 日志会把
+      // 轨迹缓冲（250 行）冲干净，真正有用的异常现场反而看不到 —— 之前就吃过
+      // 这个亏：诊断日志确实写了，但被 pass 刷掉了。
+      if (state.lastResult.changed || state.lastResult.restored || state.lastResult.skipped) {
+        trace(
+          "pass",
+          "regions=" +
+            n +
+            " changed=" +
+            state.lastResult.changed +
+            " restored=" +
+            state.lastResult.restored +
+            (state.lastResult.skipped ? " skipped=" + state.lastResult.skipped : "")
+        );
+      }
     } catch (e) {
       state.error = (e && e.message) || String(e);
       trace("pass-ERROR", state.error + " @ " + ((e && e.stack) || "").slice(0, 400));

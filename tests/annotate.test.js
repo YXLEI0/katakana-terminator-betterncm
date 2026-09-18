@@ -328,10 +328,10 @@ test("片假名开头的歌词行稳定后不能被反复「还原 + 重注」�
   assert.strictEqual(p.innerHTML, annotatedHtml, "最终 DOM 必须稳定不变");
 });
 
-test("React 丢掉注音但底字没变时，可以重做（有界，不会每轮都做）", () => {
-  // 非片假名开头（kept=true）：React 把我们的注音节点丢了，底字还在。
-  // 这种情况重新注音是合理的（否则页面就永远没有注音了），
-  // 关键是它必须在下一轮就收敛，不能每轮都动。
+test("同一行文字没变时不再重注（宁可少标，也不要抽搐）", () => {
+  // 真机轨迹：网易云/RNP 每 250ms 把整行内部换新，文字却一样。
+  // 如果每次都重注，React 一重建我们就注一次 —— 无限来回就是抽搐。
+  // 所以规则是：同一个 host、同一段可见原文，只注一次，之后不再动 DOM。
   const ctx = loadCore(
     `<!doctype html><html><body><ul class="lyric"><li><p>今日はコーヒーです</p></li></ul></body></html>`
   );
@@ -339,18 +339,32 @@ test("React 丢掉注音但底字没变时，可以重做（有界，不会每�
   const ann = makeAnnotator(ctx);
   ann.pass();
 
-  const p = ctx.document.querySelector("ul.lyric li p");
+  const p = ctx.document.querySelector("p");
+  // React 把我们插的节点丢掉，底字保留
   const node = p.firstChild;
-  while (p.lastChild !== node) p.removeChild(p.lastChild); // React 丢掉我们的节点
-  assert.strictEqual(p.querySelectorAll("ruby").length, 0);
+  while (p.lastChild !== node) p.removeChild(p.lastChild);
+  assert.strictEqual(p.textContent, "今日は", "底字保留下来");
 
+  // React 丢掉了我们的注音节点，但这段文字我们已经处理过了：
+  // 绝不能再做一次「还原 + 重注」——那正是真机上每 250ms 一次的抽搐。
+  // 规则是：宁可这一行暂时没有注音，也不动 DOM。
   const r = ann.pass();
-  assert.ok(r.changed >= 1, "应该重新注音");
-  assert.strictEqual(p.querySelectorAll("ruby").length, 1);
-  // 重做之后必须收敛
-  const r2 = ann.pass();
-  assert.strictEqual(r2.changed, 0, "重做后应立刻稳定");
-  assert.strictEqual(r2.restored, 0);
+  assert.strictEqual(r.restored, 0, "不该再还原（还原本身就会闪）");
+  assert.strictEqual(r.changed, 0, "文字没变就不该重注");
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "保持 React 渲染的样子");
+
+  // 再跑几轮，必须一直安静
+  for (let i = 0; i < 3; i++) {
+    const rr = ann.pass();
+    assert.strictEqual(rr.changed, 0, "多轮都不该动");
+    assert.strictEqual(rr.restored, 0);
+  }
+
+  // 文字真的变了才重注
+  node.nodeValue = "ギターを弾く";
+  const r3 = ann.pass();
+  assert.ok(r3.changed >= 1, "文字变了应该重注");
+  assert.strictEqual(visibleTextOf(p), "ギターを弾く");
 });
 
 test("React 整棵子树重建时不能把旧节点插回去（会渲染两遍）", () => {
@@ -361,15 +375,16 @@ test("React 整棵子树重建时不能把旧节点插回去（会渲染两遍�
   assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1);
   const original = baseText(p);
 
-  // 整行被换成全新的节点（React 重建子树）
+  // 整行被换成全新的节点（React 重建子树），文字一模一样
   const fresh = ctx.document.createTextNode(original);
   while (p.firstChild) p.removeChild(p.firstChild);
   p.appendChild(fresh);
   ann.pass();
 
-  // 底字只能出现一次（旧节点若被插回去就会重复），且重新注音一次
+  // 底线：底字绝不能重复（旧节点被插回去就会两遍）
   assert.strictEqual(baseText(p), original, "底字不能重复");
-  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "应该重新注音且只注一次");
+  // 文字没变，所以按"同一段文字只处理一次"的规则不再重注
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "文字没变就不重注，避免抽搐");
 });
 
 test("不修改任何既有元素的 class（避免触发其它歌词插件的重建）", () => {
@@ -440,6 +455,52 @@ test("隐藏的歌词副本不标注（换歌时上一首残留的容器）", ()
     assert.strictEqual(r.changed, 0, "稳定后不该再改");
     assert.strictEqual(r.restored, 0, "隐藏行不该被反复还原");
   }
+});
+
+test("React 每轮都用同样的文字重建整行时，不能每轮都重注（真机抽搐的原因）", () => {
+  // 轨迹实测：网易云/RNP 会让 18 行歌词每 250ms 重建一次，
+  // 文字一模一样却整行换新。旧实现把新文本节点当成"新的一行"重新注音，
+  // React 一重建我们注一次，永远不收敛 —— 这就是"一直抽搐"。
+  const ctx = loadCore(
+    `<!doctype html><html><body><ul class="lyric"><li class="line"><p>コーヒーを飲みながら</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+
+  ann.pass();
+  const li = ctx.document.querySelector("li.line");
+  assert.ok(li.querySelectorAll("ruby.kt-ruby").length >= 1, "先注上音");
+
+  // 模拟 React：整行元素保留，内部子节点全部换成新的（文字不变）
+  for (let round = 1; round <= 4; round++) {
+    const p = li.querySelector("p");
+    const text = baseText(p); // 可见原文
+    while (p.firstChild) p.removeChild(p.firstChild);
+    p.appendChild(ctx.document.createTextNode(text));
+
+    const r = ann.pass();
+    assert.strictEqual(r.changed, 0, `第 ${round} 轮不该重新注音（文字没变）`);
+    assert.strictEqual(r.restored, 0, `第 ${round} 轮不该还原`);
+  }
+});
+
+test("文字真的变了才重新注音", () => {
+  const ctx = loadCore(
+    `<!doctype html><html><body><ul class="lyric"><li><p>コーヒーを飲みながら</p></li></ul></body></html>`
+  );
+  forceRubyLayout(ctx, true);
+  const ann = makeAnnotator(ctx);
+  ann.pass();
+  const p = ctx.document.querySelector("p");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "先注上音");
+
+  // 换成完全不同的歌词（模拟换歌/切行）
+  while (p.firstChild) p.removeChild(p.firstChild);
+  p.appendChild(ctx.document.createTextNode("ギターを弾く"));
+
+  const r = ann.pass();
+  assert.ok(r.changed >= 1, "文字变了应该重新注音");
+  assert.strictEqual(visibleTextOf(p), "ギターを弾く");
 });
 
 test("文本节点里既有词又有普通文本时，拼接顺序不乱", () => {
