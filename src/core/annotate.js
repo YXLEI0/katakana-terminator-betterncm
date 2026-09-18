@@ -267,8 +267,8 @@
         );
       }
 
-      if (!hasRubyLayout(doc) && host.classList && !host.classList.contains("kt-fallback")) {
-        host.classList.add("kt-fallback");
+      if (!hasRubyLayout(doc) && host.setAttribute && !host.hasAttribute("data-kt-fallback")) {
+        host.setAttribute("data-kt-fallback", "1");
       }
 
       return true;
@@ -344,38 +344,41 @@
     /** 宿主/区域里已经没有我们的注音了，就把标记摘干净 */
     function untagIfClean(host, region) {
       if (region && region.isConnected && !region.querySelector("ruby.kt-ruby")) {
-        untag(region, "kt-region");
+        untagData(region, "data-kt-region");
       }
       if (host && host.isConnected && !host.querySelector("ruby.kt-ruby")) {
-        untag(host, "kt-fallback");
+        untagData(host, "data-kt-fallback");
       }
     }
 
     /**
-     * 摘掉某个元素上的标记，并把 classList 操作留下的空 class="" 清掉。
-     * 直接 classList.remove 只清值、不清属性，innerHTML 里会留下 class=""，
-     * 对「还原后与原文逐字节一致」来说是脏的。
+     * 摘掉我们挂的 data 标记（不回写 className）。
+     * 为什么不挂 class：歌词行元素是和别的插件（jp-furigana 等）共用的，
+     * 改它的 className 会让对方的渲染检查失效、重建整行，进而把我们的注音
+     * 也一起丢掉 —— 两边互相触发就是一直抽搐。data-* 属性不影响 className，
+     * 也不会被对方的检查逻辑看在眼里。
      */
-    function untag(el, cls) {
-      if (!el || !el.classList || !el.classList.contains(cls)) return;
-      el.classList.remove(cls);
-      if (el.getAttribute("class") === "") el.removeAttribute("class");
+    function untagData(el, name) {
+      if (el && el.removeAttribute && el.hasAttribute(name)) el.removeAttribute(name);
     }
 
     /**
      * 区域标记 + 降级标记的收尾。
-     * kt-region 只加在真正含注音的区域上，还原后立刻摘掉 —— 往不属于我们的
-     * 元素上挂 class 会留下痕迹，既脏又可能被别人读取。
+     * 标记只加在真正含注音的元素上，还原后立刻摘掉 —— 往不属于我们的
+     * 元素上留痕迹，既脏又可能被别人读取。
+     *
+     * 用 data-* 而不是 class：这些元素常常和别的歌词插件共用，改 className
+     * 会让对方的渲染检查失效、重建整行，两边互相触发就会一直抽搐。
      */
     function cleanup() {
-      var regions = doc.querySelectorAll(".kt-region");
+      var regions = doc.querySelectorAll("[data-kt-region]");
       for (var i = 0; i < regions.length; i++) {
-        if (!regions[i].querySelector("ruby.kt-ruby")) untag(regions[i], "kt-region");
+        if (!regions[i].querySelector("ruby.kt-ruby")) untagData(regions[i], "data-kt-region");
       }
-      var fallbacks = doc.querySelectorAll(".kt-fallback");
+      var fallbacks = doc.querySelectorAll("[data-kt-fallback]");
       for (var j = 0; j < fallbacks.length; j++) {
         var el = fallbacks[j];
-        if (!el.querySelector("ruby.kt-ruby")) untag(el, "kt-fallback");
+        if (!el.querySelector("ruby.kt-ruby")) untagData(el, "data-kt-fallback");
       }
     }
 
@@ -589,9 +592,12 @@
         try {
           if (annotateNode(node, region)) {
             changed++;
-            // 只在真的注了音之后才打区域标记
-            if (region.classList && !region.classList.contains("kt-region")) {
-              region.classList.add("kt-region");
+            // 只在真的注了音之后才打区域标记。
+            // 用 data-* 属性而不是 class：区域元素常和别的歌词插件共用，
+            // 改它的 className 会让对方判定"这行变了"并重建整行，
+            // 我们的注音跟着被丢掉、下一轮再标 —— 来回就是抽搐。
+            if (region.setAttribute && !region.hasAttribute("data-kt-region")) {
+              region.setAttribute("data-kt-region", "1");
             }
           }
         } catch (e) {
@@ -652,9 +658,9 @@
       "  -webkit-user-select: none;",
       "}",
       // 内核不支持 ruby 排版：注音脱离文档流，免得 <rt> 退化成 block 撑坏行高
-      ".kt-fallback { position: relative; }",
-      ".kt-fallback > ruby.kt-ruby { position: relative; display: inline-block; }",
-      ".kt-fallback > ruby.kt-ruby > .kt-rt {",
+      '[data-kt-fallback] { position: relative; }',
+      '[data-kt-fallback] > ruby.kt-ruby { position: relative; display: inline-block; }',
+      '[data-kt-fallback] > ruby.kt-ruby > .kt-rt {',
       "  position: absolute;",
       "  left: 50%;",
       "  bottom: 100%;",
@@ -666,7 +672,7 @@
       // 这几条是为了对抗 RefinedNowPlaying 之类的逐字歌词插件：它给嵌套 span 打
       // opacity，嵌套相乘会把注音压得几乎看不见，所以对注音强制不透明。
       "ruby.kt-ruby, rt.kt-rt { opacity: 1 !important; }",
-      focus ? ".kt-region { outline: 1px dashed rgba(255,80,80,.5); }" : "",
+      focus ? "[data-kt-region] { outline: 1px dashed rgba(255,80,80,.5); }" : "",
     ]
       .filter(Boolean)
       .join("\n");

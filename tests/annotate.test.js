@@ -100,10 +100,12 @@ test("还原后 DOM 与原文完全一致（含不残留 class 痕迹）", () =>
   const ann = makeAnnotator(ctx);
   ann.pass();
   assert.notStrictEqual(ctx.document.body.innerHTML, before, "应该有改动");
-  assert.ok(ctx.document.querySelector(".kt-region"), "标注期间应有区域标记");
+  assert.ok(ctx.document.querySelector("[data-kt-region]"), "标注期间应有区域标记");
   ann.restoreAll();
   assert.strictEqual(ctx.document.body.innerHTML, before, "还原后应逐字节一致");
-  assert.strictEqual(ctx.document.querySelectorAll(".kt-region").length, 0, "区域标记要摘干净");
+  assert.strictEqual(ctx.document.querySelectorAll("[data-kt-region]").length, 0, "区域标记要摘干净");
+  // 关键：不能给共用元素留下任何 class 变化（会让别的歌词插件重建整行）
+  assert.strictEqual(/kt-region|kt-fallback/.test(ctx.document.body.innerHTML), false, "不能残留 class 标记");
 });
 
 test("重复 pass 不会重复插入注音", () => {
@@ -155,7 +157,7 @@ test("内核不支持 ruby 排版时降级成绝对定位的 span", () => {
   assert.ok(span, "注音应该放在 span.kt-rt 里");
   assert.strictEqual(span.textContent, "coffee");
   // 宿主元素要带上降级标记，CSS 才生效
-  assert.ok(ruby.parentNode.classList.contains("kt-fallback"));
+  assert.ok(ruby.parentNode.hasAttribute("data-kt-fallback"), "宿主应有降级标记");
 });
 
 test("样式表可以注入并按设置更新", () => {
@@ -368,6 +370,42 @@ test("React 整棵子树重建时不能把旧节点插回去（会渲染两遍�
   // 底字只能出现一次（旧节点若被插回去就会重复），且重新注音一次
   assert.strictEqual(baseText(p), original, "底字不能重复");
   assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "应该重新注音且只注一次");
+});
+
+test("不修改任何既有元素的 class（避免触发其它歌词插件的重建）", () => {
+  // 歌词行元素是和 jp-furigana 等插件共用的。如果改它们的 className，
+  // 对方的渲染检查会判定"这行变了"并重建整行，把我们的注音一起丢掉，
+  // 两边互相触发就是一直抽搐。所以标记一律用 data-*。
+  const ctx = newCtx();
+  const snapshot = () => {
+    const m = [];
+    const all = ctx.document.querySelectorAll("*");
+    for (let i = 0; i < all.length; i++) m.push(all[i].tagName + "#" + (all[i].getAttribute("class") || ""));
+    return m;
+  };
+  const before = snapshot();
+  const ann = makeAnnotator(ctx);
+  ann.pass();
+
+  const after = snapshot();
+  const beforeSet = new Set(before);
+  const added = after.filter((x) => !beforeSet.has(x));
+  // 允许新增我们自己创建的元素（ruby / rt / span），它们带 kt-* class 是应该的
+  const suspicious = added.filter((x) => !/^(RUBY|RT|SPAN|#text)/.test(x) || !/kt-/.test(x));
+  assert.deepStrictEqual(
+    suspicious.filter((x) => /^.+#/.test(x)),
+    [],
+    "不允许新增带 class 的既有元素"
+  );
+
+  // 更直接的检查：所有原本存在的元素的 class 必须一字不变
+  const origEls = ctx.document.querySelectorAll("ul.lyric, ul.lyric li, ul.lyric li p, div#app");
+  for (let i = 0; i < origEls.length; i++) {
+    const el = origEls[i];
+    const cls = el.getAttribute("class") || "";
+    assert.strictEqual(/kt-/.test(cls), false, `元素 ${el.tagName}.${cls} 的 class 里不该出现 kt-`);
+  }
+  assert.ok(ctx.document.querySelector("[data-kt-region]"), "标记应该落在 data 属性上");
 });
 
 test("文本节点里既有词又有普通文本时，拼接顺序不乱", () => {
