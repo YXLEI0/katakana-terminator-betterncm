@@ -37,6 +37,13 @@
   // ------------------------------------------------------------ 基础工具
 
   function log() {
+    var msg = "";
+    try {
+      msg = Array.prototype.join.call(arguments, " ");
+    } catch (e) {
+      msg = "(unserializable)";
+    }
+    trace("log", msg);
     if (!config || config.verbose) {
       try {
         console.log.apply(console, [LOG].concat(Array.prototype.slice.call(arguments)));
@@ -47,10 +54,49 @@
   }
 
   function warn() {
+    var msg = "";
+    try {
+      msg = Array.prototype.join.call(arguments, " ");
+    } catch (e) {
+      msg = "(unserializable)";
+    }
+    trace("WARN", msg);
     try {
       console.warn.apply(console, [LOG].concat(Array.prototype.slice.call(arguments)));
     } catch (e) {
       /* ignore */
+    }
+  }
+
+  /*
+   * 运行轨迹信标。
+   *
+   * 插件把每次扫描的关键信息和异常写进 localStorage，出问题后即使开发者工具
+   * 不方便看，也能从网易云的 Local Storage 里把现场读出来（tools 里有读取脚本）。
+   * 上限 250 行，超出丢最旧的，避免把配额写爆。
+   */
+  var TRACE_KEY = "katakana-terminator.trace";
+  var TRACE_MAX = 250;
+
+  function trace(kind, msg) {
+    try {
+      if (typeof localStorage === "undefined") return;
+      var arr = [];
+      try {
+        arr = JSON.parse(localStorage.getItem(TRACE_KEY)) || [];
+      } catch (e) {
+        arr = [];
+      }
+      var t = new Date();
+      var pad = function (n) {
+        return (n < 10 ? "0" : "") + n;
+      };
+      var stamp = pad(t.getHours()) + ":" + pad(t.getMinutes()) + ":" + pad(t.getSeconds());
+      arr.push(stamp + " [" + kind + "] " + String(msg).slice(0, 300));
+      if (arr.length > TRACE_MAX) arr = arr.slice(arr.length - TRACE_MAX);
+      localStorage.setItem(TRACE_KEY, JSON.stringify(arr));
+    } catch (e) {
+      /* 写不进去就算了，绝不能因为记录日志把插件搞崩 */
     }
   }
 
@@ -155,23 +201,30 @@
     if (!config.enabled || !state.annotator) return;
     // 改动 localStorage 后不重启也能立刻停手（下一轮扫描前生效）
     if (emergencyOff()) {
+      warn("检测到紧急开关，停用插件");
       disable();
       return;
     }
     var t0 = performance.now();
     try {
       var regions = buildRegions();
+      var n = 0;
+      for (var ri = 0; ri < regions.length; ri++) if (regions[ri].isConnected) n++;
       state.lastResult = state.annotator.pass(regions);
       state.error = null;
+      trace(
+        "pass",
+        "regions=" + n + " changed=" + state.lastResult.changed + " restored=" + state.lastResult.restored
+      );
     } catch (e) {
       state.error = (e && e.message) || String(e);
+      trace("pass-ERROR", state.error + " @ " + ((e && e.stack) || "").slice(0, 400));
       warn("扫描失败", e);
     } finally {
       // MutationObserver 的回调在本轮同步任务之后才跑，光靠标志位挡不住
       // 我们自己造成的变更；把记录队列清空，否则会自激成死循环。
       if (state.observer) state.observer.takeRecords();
       state.lastPassMs = Math.round(performance.now() - t0);
-      if (state.lastResult && state.lastResult.changed) log("本轮新增注音", state.lastResult.changed);
     }
   }
 
@@ -482,9 +535,55 @@
   });
 
   plugin.onLoad(function () {
+    trace(
+      "boot",
+      "onLoad 开始 off=" +
+        emergencyOff() +
+        " enabled=" +
+        config.enabled +
+        " annotateAll=" +
+        config.annotateAll +
+        " scope=" +
+        config.scope +
+        " 模块 matcher=" +
+        (typeof KTMatcher) +
+        " annotate=" +
+        (typeof KTAnnotate)
+    );
+    // 捕获未处理异常，这样即使崩溃也能在轨迹里留下线索
+    try {
+      window.addEventListener("error", function (ev) {
+        trace(
+          "window-error",
+          (ev && ev.message ? ev.message : "(no message)") +
+            " @ " +
+            ((ev && ev.filename) || "?") +
+            ":" +
+            ((ev && ev.lineno) || 0) +
+            " stack=" +
+            (((ev && ev.error && ev.error.stack) || "") + "").slice(0, 300)
+        );
+      });
+      window.addEventListener("unhandledrejection", function (ev) {
+        var r = ev && ev.reason;
+        trace("unhandled-rejection", ((r && (r.message || r)) + "").slice(0, 300));
+      });
+    } catch (e) {
+      /* 加不上就算了 */
+    }
     if (emergencyOff()) {
       warn("已设置 localStorage['katakana-terminator.off']=1，本次不启动。清掉这个键并重启即可恢复。");
       return;
+    }
+    // BetterNCM 有安全模式（localStorage['betterncm.safemode']）。
+    // 它在安全模式下通常不会加载插件，这里再确认一次，避免我们还是动了 DOM。
+    try {
+      if (localStorage.getItem("betterncm.safemode") === "true") {
+        trace("boot", "BetterNCM 处于安全模式，跳过启动");
+        return;
+      }
+    } catch (e) {
+      /* 读不到就算了 */
     }
     if (typeof KTMatcher === "undefined" || typeof KTAnnotate === "undefined") {
       warn("核心模块未注入，检查 manifest.json 的 injects 顺序");
@@ -528,7 +627,8 @@
         },
         annotateAll: config.annotateAll !== false,
         log: function () {
-          if (config.verbose) console.log.apply(console, [LOG].concat(Array.prototype.slice.call(arguments)));
+          // 走 trace：注音明细只在出问题时才有价值，默认不进 console，但一定要留痕
+          trace("annotate", Array.prototype.join.call(arguments, " "));
         },
       });
     } catch (e) {
@@ -539,6 +639,8 @@
 
     if (config.enabled) enable();
     else state.annotator.restoreAll();
+
+    trace("boot", "初始化完成，annotator=" + !!state.annotator + " translator=" + !!state.translator);
 
     window.KatakanaTerminator = {
       config: config,

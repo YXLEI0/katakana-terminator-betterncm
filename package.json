@@ -1,6 +1,6 @@
 {
   "name": "katakana-terminator-betterncm",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "BetterNCM 插件：在片假名外来语上方标注英文原词（Katakana Terminator 的网易云移植版）",
   "private": true,
   "license": "MIT",

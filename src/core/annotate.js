@@ -226,6 +226,17 @@
         kept: !leadIsRuby,
       });
 
+      if (options.log && records.size <= 12) {
+        options.log(
+          "注音 " +
+            (region.tagName || "?") +
+            "." +
+            String(region.className || "").split(" ")[0] +
+            " <- " +
+            JSON.stringify(text.slice(0, 40))
+        );
+      }
+
       if (!hasRubyLayout(doc) && host.classList && !host.classList.contains("kt-fallback")) {
         host.classList.add("kt-fallback");
       }
@@ -474,8 +485,17 @@
               }
             }
           } catch (e) {
-            // 单个节点失败不影响其它节点
-            if (options.log) options.log("注音失败：", e && e.message);
+            // 单个节点失败不影响其它节点；把现场记下来便于定位
+            if (options.log) {
+              options.log(
+                "注音失败 tag=" +
+                  (list[r].tagName || "?") +
+                  " cls=" +
+                  String(list[r].className || "").slice(0, 60) +
+                  " err=" +
+                  ((e && e.message) || e)
+              );
+            }
           }
         }
       }

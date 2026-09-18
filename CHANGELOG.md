@@ -1,5 +1,19 @@
 # 更新记录
 
+## 1.0.4
+
+1.0.3 的改动（不再替换 React 的文本节点）没能解决「应用出错了」，
+而渲染进程的控制台异常读不到（native 日志 `cloudmusic.elog` 不含它），
+所以这一版先把**取证**做好，不再靠猜：
+
+- 新增运行轨迹信标：插件把启动信息、每轮扫描结果、注音明细、`pass` 异常、
+  以及 `window.onerror` / `unhandledrejection` 抓到的东西写进
+  `localStorage['katakana-terminator.trace']`（最多 250 行，写失败绝不影响插件）。
+  落盘在网易云的 Local Storage 里，可以用 `node tools/read-trace.js` 读出来。
+- 新增 `tools/cdp-capture.js`：带 `--remote-debugging-port=9222` 启动网易云后，
+  直接读渲染进程的 console 与未捕获异常。
+- 检测 BetterNCM 安全模式（`betterncm.safemode`），安全模式下完全不动 DOM。
+
 ## 1.0.3
 
 修「启用插件后网易云提示『应用出错了…重启下试试吧』」。
