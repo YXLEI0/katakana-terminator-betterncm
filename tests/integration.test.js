@@ -148,9 +148,23 @@ test("注入 5 个文件后，插件注册了 onLoad / onConfig", async () => {
   assert.strictEqual(env.api, env.window.KatakanaTerminator);
 });
 
-test("onLoad 之后会自动给歌词加注音", async () => {
+test("默认只标播放栏，不碰歌词（歌词默认关，避免抽搐）", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
+  await sleep(500);
+
+  // 播放栏被标注
+  assert.ok(env.document.querySelectorAll(".m-playbar ruby.kt-ruby").length > 0, "播放栏应该被标注");
+  // 歌词不动 —— 歌词行 DOM 会被高频重建，默认不碰
+  assert.strictEqual(env.document.querySelectorAll("ul.lyric ruby.kt-ruby").length, 0, "默认不该标歌词");
+  assert.strictEqual(env.api.config.scope, "titles");
+});
+
+test("把范围切成「只标歌词」后，歌词会被标注", async () => {
+  const env = bootPlugin(NCM_HTML);
+  await env.runLoad();
+  await sleep(300);
+  env.api.set("scope", "lyrics");
   await sleep(500);
 
   const lines = env.document.querySelectorAll("ul.lyric li p");
@@ -180,15 +194,15 @@ test("标题栏（播放栏）里的片假名也被标注", async () => {
   assert.strictEqual(baseText(env.document.querySelector(".m-playbar .by")), "ギター太郎");
 });
 
-test("关掉「标注全部」后，只处理歌词", async () => {
+test("关掉「标注播放栏」后播放栏不再被标注", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(400);
+  assert.ok(rubyCount(env.document.querySelector(".m-playbar")) > 0, "先确认播放栏已被标注");
   env.api.set("annotateAll", false);
   await sleep(500);
 
-  assert.strictEqual(rubyCount(env.document.querySelector(".m-playbar")), 0, "标题不该被标注");
-  assert.ok(rubyCount(env.document.querySelector("ul.lyric")) >= 1, "歌词仍要标注");
+  assert.strictEqual(rubyCount(env.document.querySelector(".m-playbar")), 0, "关掉后播放栏不该被标注");
 });
 
 test("禁用后 DOM 完全还原，重新启用后又能标注", async () => {
@@ -212,6 +226,8 @@ test("禁用后 DOM 完全还原，重新启用后又能标注", async () => {
 test("断网时依然能用离线词典标注", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
+  await sleep(400);
+  env.api.set("scope", "lyrics"); // 歌词默认关，这里显式打开来验证离线词典
   await sleep(600);
   // fetch 全程失败，但词典命中的词照样标上
   const rt = env.document.querySelector("ul.lyric li p ruby.kt-ruby .kt-rt");

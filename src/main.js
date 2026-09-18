@@ -25,8 +25,8 @@
   var DEFAULTS = {
     enabled: true,
     online: true, // 词典没有的词是否联网翻译
-    annotateAll: true, // 除歌词外是否也标播放栏的歌曲名/歌手（白名单，绝不含整页）
-    scope: "auto", // auto | lyrics | custom
+    annotateAll: true, // 是否标播放栏的歌曲名/歌手（白名单，绝不含整页）
+    scope: "titles", // titles（默认，稳定）| lyrics | all | custom
     customSelector: "",
     rtSize: 60, // 注音字号（相对底字百分比）
     rtOpacity: 80, // 注音不透明度
@@ -179,19 +179,23 @@
 
   function buildRegions() {
     if (!state.annotator) return [];
-    // 自定义选择器优先；匹配不到就退回自动模式
+    // 自定义选择器优先；匹配不到就退回下面的模式
     if (config.scope === "custom" && config.customSelector) {
       var custom = state.annotator.customRegions(config.customSelector);
       if (custom.length) return custom;
       log("自定义选择器没匹配到元素，回退自动模式");
     }
-    // 只标歌词
-    if (config.scope === "lyrics" || config.annotateAll === false) {
-      return state.annotator.findRegions("lyrics");
+    // 默认：只标播放栏的歌曲名/歌手。
+    // 歌词行的 DOM 由网易云和别的歌词插件高频重建，注音进去会被反复丢掉，
+    // 追着重注就会抽搐，所以歌词默认不开，需要的人自己去设置里打开。
+    if (config.scope === "titles") {
+      return config.annotateAll === false
+        ? []
+        : state.annotator.findRegions("titles");
     }
-    // 默认：歌词 + 标题/歌手白名单。
-    // 注意这里绝不返回 document.body —— 早期版本用整页当区域，把侧边栏、
-    // 搜索框、歌单名全改了，直接把网易云干到错误页。
+    // 只标歌词
+    if (config.scope === "lyrics") return state.annotator.findRegions("lyrics");
+    // 全都标
     return state.annotator.findRegions("safe");
   }
 
@@ -213,7 +217,12 @@
       // 只在「真的做了什么」时记录。稳定状态下每 250ms 一条 pass 日志会把
       // 轨迹缓冲（250 行）冲干净，真正有用的异常现场反而看不到 —— 之前就吃过
       // 这个亏：诊断日志确实写了，但被 pass 刷掉了。
-      if (state.lastResult.changed || state.lastResult.restored || state.lastResult.skipped) {
+      if (
+        state.lastResult.changed ||
+        state.lastResult.restored ||
+        state.lastResult.skipped ||
+        state.lastResult.unstable
+      ) {
         trace(
           "pass",
           "regions=" +
@@ -222,7 +231,8 @@
             state.lastResult.changed +
             " restored=" +
             state.lastResult.restored +
-            (state.lastResult.skipped ? " skipped=" + state.lastResult.skipped : "")
+            (state.lastResult.skipped ? " skipped=" + state.lastResult.skipped : "") +
+            (state.lastResult.unstable ? " unstable=" + state.lastResult.unstable : "")
         );
       }
     } catch (e) {
@@ -357,10 +367,14 @@
       '<div class="kt-row"><label>注音不透明度 <input type="range" data-k="rtOpacity" min="10" max="100" step="1"> <span data-v="rtOpacity"></span></label></div>' +
       "<h3>范围</h3>" +
       '<div class="kt-row"><label>标注范围 <select data-k="scope">' +
-      '<option value="auto">自动（歌词 + 标题）</option>' +
+      '<option value="titles">只标播放栏的歌曲名 / 歌手（最稳，默认）</option>' +
       '<option value="lyrics">只标歌词</option>' +
+      '<option value="all">歌词 + 播放栏</option>' +
       '<option value="custom">自定义选择器</option>' +
       "</select></label></div>" +
+      '<div class="kt-hint">歌词行的 DOM 会被网易云和别的歌词插件高频重建，注音可能被反复丢掉。' +
+      "插件会自动放弃「一直在变」的行（宁可少标也不闪）。如果你发现歌词抽搐，就是这个原因——" +
+      "把它切回「只标播放栏」即可。</div>" +
       '<div class="kt-row"><label>自定义选择器 <input type="text" data-k="customSelector" placeholder="例如 ul.lyric > li"></label></div>' +
       '<div class="kt-hint">选择器留空或匹配不到元素时会自动回退。</div>' +
       "<h3>操作</h3>" +

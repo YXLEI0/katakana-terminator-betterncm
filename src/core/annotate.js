@@ -99,6 +99,17 @@
      *   plain     = React 把我们插的节点丢掉后的可见底字（可能只剩前半截）
      * 这两种都说明"这段内容我们已经处理过"，不该再动。
      */
+    /*
+     * host 元素 -> { text, changes }：这段可见文本最近变了多少次。
+     *
+     * 用途：真机上歌词行的内容每 250ms 就会被重建/改写（逐字动画、逐行滚动、
+     * 别的插件在重排）。这种"一直在动"的元素，我们注进去的注音下一秒就会被
+     * 丢掉，追着重注就是抽搐。所以对反复变化的 host 直接放弃，不再碰它 ——
+     * 稳定性优先于覆盖率。
+     */
+    var motionByHost = new WeakMap();
+    var MOTION_LIMIT = 3; // 连续变化超过这个次数就判定为"在动"，放弃
+
     var decidedByHost = new WeakMap();
 
     // 不进去的标签
@@ -592,17 +603,17 @@
     /**
      * 找出要处理的区域。
      *
-     *   "lyrics" —— 只找歌词容器；找不到返回空数组，由上层决定是否回退
-     *   "safe"   —— 歌词 + 标题/歌手白名单（默认，绝不含 body）
+     *   "lyrics" —— 只找歌词容器
+     *   "titles" —— 只找播放栏的歌曲名/歌手（DOM 稳定，默认用它）
+     *   "safe"   —— 歌词 + 标题白名单
      *
-     * 为什么没有"整页 body"这个模式：实测它会把侧边栏/搜索框/歌单名全改了，
+     * 为什么没有"整页 body"：实测它会把侧边栏/搜索框/歌单名全改了，
      * 直接把应用干崩（见 TARGET_SELECTORS 上面的注释）。宁可少标，不可越界。
      */
     function findRegions(mode) {
       if (!doc || !doc.body) return [];
-      if (mode === "safe") {
-        return collectBySelectors(LYRIC_SELECTORS.concat(TARGET_SELECTORS));
-      }
+      if (mode === "titles") return collectBySelectors(TARGET_SELECTORS);
+      if (mode === "safe") return collectBySelectors(LYRIC_SELECTORS.concat(TARGET_SELECTORS));
       return collectBySelectors(LYRIC_SELECTORS);
     }
 
@@ -631,8 +642,22 @@
       // 只清掉宿主已经脱离文档的记录（那块 DOM 已经没了）
       var restored = dropDetached();
 
-      var list = regions && regions.length ? regions : findRegions("safe");
-      if (!list.length) return { scanned: 0, changed: 0, restored: restored };
+      // 注意判断顺序：传了数组就用传进来的，**哪怕是空数组**。
+      // 旧写法 `regions && regions.length ? regions : findRegions(...)`
+      // 会把空数组当成"没传"，于是"不标任何区域"反而变成了"扫默认区域"——
+      // 设置里关掉播放栏标注后它还在注音，就是这个 bug。
+      var list = regions ? regions : findRegions("safe");
+      if (!list.length) {
+        // 一个区域都没有（例如用户把范围改成"不标"）：
+        // 要把已有的注音撤掉，而不是什么都不做 —— 否则关掉开关后
+        // 页面上还留着之前注的音，看起来像"关不掉"。
+        if (records.size) {
+          var removed = records.size;
+          restoreAll();
+          return { scanned: 0, changed: 0, restored: removed, skipped: 0, unstable: 0 };
+        }
+        return { scanned: 0, changed: 0, restored: restored };
+      }
 
       // 先收集一遍待检查的文本节点。
       // 注意：还原（restoreRecord）会改变 host 的子节点结构，但那些文本节点
@@ -645,6 +670,7 @@
 
       var changed = 0;
       var skipped = 0;
+      var unstable = 0;
       for (var i = 0; i < candidates.length; i++) {
         var node = candidates[i];
         // 所属区域：可能是被包含的子区域，取文档顺序里第一个包含它的
@@ -663,6 +689,26 @@
         //   其它      —— 文字真的变了 -> 丢掉旧记录，重新注音
         var hostEl = node.parentNode;
         var visibleNow = hostEl ? visibleText(hostEl) : "";
+
+        // 这个 host 的可见文本是不是一直在变？一直在变就放弃它，
+        // 别再追着重注 —— 追就是抽搐。
+        if (hostEl) {
+          var motion = motionByHost.get(hostEl);
+          if (!motion) {
+            // 第一次见：只登记，不算变化（否则我们自己注音造成的可见文本变化
+            // 会被记成"在动"，把正常的行也放弃掉）
+            motion = { text: visibleNow, changes: 0 };
+            motionByHost.set(hostEl, motion);
+          } else if (motion.text !== visibleNow) {
+            motion.text = visibleNow;
+            motion.changes++;
+          }
+          if (motion.changes >= MOTION_LIMIT) {
+            unstable++;
+            continue;
+          }
+        }
+
         var prior = hostEl ? decidedByHost.get(hostEl) : null;
         if (prior) {
           if (prior.annotated === visibleNow) {
@@ -736,7 +782,13 @@
           }
         }
       }
-      return { scanned: list.length, changed: changed, restored: restored, skipped: skipped };
+      return {
+        scanned: list.length,
+        changed: changed,
+        restored: restored,
+        skipped: skipped,
+        unstable: unstable,
+      };
     }
 
     function injectedCount() {
