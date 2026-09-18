@@ -1,5 +1,37 @@
 # 更新记录
 
+## 1.1.1
+
+按「各管各的元素」重做与 jp-furigana 的共存（不再依赖浮层）。
+
+关键发现：jp-furigana 的 `processLine()` 里有一条
+`if (!FuriganaCore.hasKanji(text)) { line.__fgHosts = []; return; }`
+—— **纯假名行它压根不管**。所以按「含不含汉字」分工就行：
+
+- **含汉字的歌词行**：整个让给它，我们一个字节都不碰；
+- **纯假名行**：归我们；
+- **播放栏的歌曲名/歌手**：它从来不碰，我们照标（含汉字也标）。
+
+于是 `lyricRender` 默认回到 `inline`（排版正确，不再是浮层），
+靠这条分工规则避免冲突。浮层作为可选项保留（`lyricRender: "overlay"`），
+适合"我全都要"的场景。
+
+实现要点：
+
+- `matcher.hasKanji()`：和 jp-furigana 同口径的汉字判断；
+- `annotate.js` 新增 `skipKanjiLines` 选项（默认 `false`，不改变模块自身语义；
+  由 `main.js` 在 inline 模式下传函数，每次扫描实时求值）；
+- 新增 `isLyricRegion()`：只对**歌词行**做分工 —— 播放栏名称含汉字也要照标；
+- 新增 `lineHasKanji()`：判断"看得见的原文"里有没有汉字。
+  不能直接用 `textContent` —— 振假名插件插的 `<rt>` 文字也算 textContent，
+  会把纯假名行误判成含汉字，导致该我们管的行反而被让出去。
+
+修掉两个自己引入的 bug：`isLyricRegion` 最初把播放栏也判成歌词行（
+`player-bar` 命中 `lyric`? 不，是判据过宽），以及循环里 `region` 变量
+在使用之后才赋值。
+
+测试 71 个全过。
+
 ## 1.1.0
 
 **新增浮层渲染，可以和 jp-furigana（振假名插件）在同一行歌词上共存。**

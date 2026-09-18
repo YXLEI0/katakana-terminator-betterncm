@@ -30,11 +30,9 @@
     // 歌词用浮层是因为 jp-furigana 这类插件会重建歌词行，往里插节点必被抹掉。
     scope: "all", // titles | lyrics | all | custom
     customSelector: "",
-    // 歌词用哪种渲染：
-    //   "overlay" —— 浮层（默认）：完全不碰歌词 DOM，因此不会和 jp-furigana
-    //                之类会重建歌词行的插件打架；代价是不参与排版、需重新测量
-    //   "inline"  —— 直接在歌词行里插 <ruby>：排版正确，但会和 jp-furigana 冲突
-    lyricRender: "overlay",
+    // 歌词用「直接写进歌词行」渲染（方案 A）：含汉字的行整个让给振假名插件，
+    // 纯假名行归我们，两边不碰同一个元素。想换成浮层可以在这里改，见设置面板。
+    lyricRender: "inline",
     rtSize: 60, // 注音字号（相对底字百分比）
     rtOpacity: 80, // 注音不透明度
     focusDebug: false, // 给已注音区域描边，用来排障
@@ -108,7 +106,7 @@
   }
 
   // 改了默认值就 +1，用来把旧版本存下来的设置迁移掉
-  var CONFIG_VERSION = 2;
+  var CONFIG_VERSION = 3;
 
   function loadConfig() {
     var saved = {};
@@ -121,10 +119,11 @@
     for (var k in DEFAULTS) cfg[k] = DEFAULTS[k];
     for (var k2 in saved) if (k2 in DEFAULTS) cfg[k2] = saved[k2];
 
-    // v1 -> v2：歌词改成走浮层渲染（不再往歌词 DOM 里插节点）。
-    // 旧版本存下来的 lyricRender / scope 可能还是旧的组合，统一按新默认来，
-    // 避免"改了默认值但对老配置无效"（之前踩过这个坑）。
-    if (!(saved.configVersion >= 2)) {
+    // v1 -> v2：歌词改为「按行分工」渲染。
+    // 旧配置里可能存着往歌词 DOM 插节点的组合，那会和振假名插件互相打架；
+    // 迁移时统一按新默认来（scope=all + lyricRender=inline），
+    // 冲突由"含汉字的行整个让给振假名插件"这条规则避免。
+    if (!(saved.configVersion >= 3)) {
       cfg.scope = DEFAULTS.scope;
       cfg.lyricRender = DEFAULTS.lyricRender;
     }
@@ -731,6 +730,12 @@
           return state.translator.lookup(word);
         },
         annotateAll: config.annotateAll !== false,
+        // 直接把注音写进歌词行时，含汉字的行要整体让给振假名插件（jp-furigana），
+        // 否则两边会来回重建同一行。用浮层时不改 DOM，就没有这个必要。
+        // 这里传函数：设置随时可能变，必须每次扫描时重新判断。
+        skipKanjiLines: function () {
+          return !useOverlayForLyrics();
+        },
         log: function () {
           // 走 trace：注音明细只在出问题时才有价值，默认不进 console，但一定要留痕
           trace("annotate", Array.prototype.join.call(arguments, " "));

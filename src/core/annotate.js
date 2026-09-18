@@ -82,6 +82,24 @@
     if (typeof lookup !== "function") throw new Error("createAnnotator 需要 lookup(word) 函数");
 
     var annotateAll = options.annotateAll !== false; // false = 只标歌词
+
+    /*
+     * 只处理「不含汉字」的行，把含汉字的行让给振假名插件（jp-furigana）。
+     *
+     * 为什么要让：jp-furigana 会把整行内容换成自己的 wrap，并用
+     * `h.childNodes.length !== 1` 判断"这行有没有被外人动过"。我往它管的行里
+     * 插节点，它就判定行脏、还原、重建整行，我的注音随之被抹掉，来回就是抽搐。
+     * 而它的判据里有一条 `if (!hasKanji(text)) { line.__fgHosts = []; return; }`
+     * —— **纯假名行它压根不管**。所以按"含不含汉字"分工，两边永远不碰同一个元素。
+     */
+    // 默认不跳过：这是为「与振假名插件共存」准备的可选项，
+    // 由上层在"直接写进歌词行"时打开。默认打开会让含汉字的歌词行全都不标，
+    // 那是行为变更，不该由底层模块擅自决定。
+    var skipKanjiLinesOption = options.skipKanjiLines != null ? options.skipKanjiLines : false;
+    /** 每次扫描时重新求值：设置可能随时变，所以允许传函数 */
+    function shouldSkipKanjiLines() {
+      return typeof skipKanjiLinesOption === "function" ? !!skipKanjiLinesOption() : !!skipKanjiLinesOption;
+    }
     // 记录我们改过的文本节点： node -> { host, nodes, plain, region }
     var records = new Map();
 
@@ -381,6 +399,47 @@
       return rec.nodes.length > 0;
     }
 
+    /**
+     * 这个区域是不是「歌词行」。
+     * 只有歌词行才需要按"含不含汉字"和振假名插件分工 ——
+     * 播放栏的歌曲名/歌手它根本不管，含汉字也照标。
+     *
+     * 判据：祖先里出现歌词相关的 class（lyric / line / rnp-）；
+     * 但玩家栏（playbar）本身带 "line"？不会——所以额外排除播放栏那几类，
+     * 免得把歌曲名误判成歌词行。
+     */
+    function isLyricRegion(el) {
+      for (var p = el; p && p !== doc.body; p = p.parentElement) {
+        var cn = typeof p.className === "string" ? p.className : "";
+        if (/playbar|nowplaying|now-playing|player-bar/i.test(cn)) return false;
+        if (/\bline\b|lyric|rnp-/.test(cn)) return true;
+      }
+      return false;
+    }
+
+    /**
+     * 这行「看得见的原文」里有没有汉字。
+     *
+     * 不能直接用 textContent：振假名插件插的 <rt> 文字也算 textContent，
+     * 那会让纯片假名行被误判成"含汉字"，于是该我们管的行反而被让出去。
+     * 所以照 jp-furigana 的口径剔除 RT/RP 再判断。
+     */
+    function lineHasKanji(lineEl) {
+      var out = "";
+      var walker = doc.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+          for (var p = node.parentNode; p && p !== lineEl; p = p.parentNode) {
+            if (p.tagName === "RT" || p.tagName === "RP") return NodeFilter.FILTER_REJECT;
+            var c = typeof p.className === "string" ? p.className : "";
+            if (/(^|\s)(fg-rt|kt-rt|kt-ov-label)(\s|$)/.test(c)) return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      while (walker.nextNode()) out += walker.currentNode.nodeValue || "";
+      return matcher.hasKanji(out);
+    }
+
     /** 摘掉我们插进去的所有节点（注音 + 文本分段） */
     function removeInjected(rec) {
       for (var i = 0; i < rec.nodes.length; i++) {
@@ -675,8 +734,10 @@
       var changed = 0;
       var skipped = 0;
       var unstable = 0;
+      var kanjiSkipped = 0;
       for (var i = 0; i < candidates.length; i++) {
         var node = candidates[i];
+
         // 所属区域：可能是被包含的子区域，取文档顺序里第一个包含它的
         var region = list[0];
         for (var ri = 0; ri < list.length; ri++) {
@@ -686,6 +747,23 @@
           }
         }
         if (!region.isConnected || !isVisible(region)) continue;
+
+        // 按「行」分工：含汉字的**歌词行**整个让给振假名插件（见 skipKanjiLines 说明）。
+        // 只对歌词行生效 —— 播放栏的歌曲名/歌手它不管，含汉字也要照标。
+        // 必须在行级别判断并尽早 continue：只跳过半个行，会让这一行其余部分
+        // 仍被我们改写，等于又去碰别人管的元素。
+        if (shouldSkipKanjiLines() && isLyricRegion(region)) {
+          var lineEl = node.parentNode;
+          for (var up = 0; up < 4 && lineEl && lineEl !== doc.body; up++) {
+            var cn = typeof lineEl.className === "string" ? lineEl.className : "";
+            if (lineEl.tagName === "LI" || /\bline\b|lyric-line/.test(cn)) break;
+            lineEl = lineEl.parentNode;
+          }
+          if (lineEl && lineEl.nodeType === 1 && lineHasKanji(lineEl)) {
+            kanjiSkipped++;
+            continue;
+          }
+        }
 
         // 这个 host 我们注过音。判断当前这段可见内容属于哪种情况：
         //   annotated —— 我们的注音还在，内容也没变 -> 什么都不用做
@@ -792,6 +870,7 @@
         restored: restored,
         skipped: skipped,
         unstable: unstable,
+        kanjiSkipped: kanjiSkipped,
       };
     }
 

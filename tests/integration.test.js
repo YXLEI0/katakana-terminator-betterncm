@@ -32,6 +32,7 @@ const NCM_HTML = `<!doctype html><html><head></head><body>
   <div class="m-lyric">
     <ul id="mod_pc_lyric_record" class="lyric">
       <li class="line"><p>コーヒーを飲みながら</p></li>
+      <li class="line"><p>ギターとピアノのセッション</p></li>
       <li class="line"><p>コンピューターの前に座る</p></li>
       <li class="line"><p>作詞: テスト太郎</p></li>
     </ul>
@@ -149,50 +150,67 @@ test("注入 5 个文件后，插件注册了 onLoad / onConfig", async () => {
   assert.strictEqual(env.api, env.window.KatakanaTerminator);
 });
 
-test("默认：歌词走浮层（不碰歌词 DOM），播放栏走 DOM 注音", async () => {
+test("默认：含汉字的歌词行让给振假名插件，纯假名行归我们", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
-  await sleep(500);
+  await sleep(600);
 
   // 播放栏用 DOM 注音
   assert.ok(env.document.querySelectorAll(".m-playbar ruby.kt-ruby").length > 0, "播放栏应该被标注");
-  // 歌词：DOM 里绝不能有我们的注音（这样 jp-furigana 才不会被触发重建）
-  assert.strictEqual(env.document.querySelectorAll("ul.lyric ruby.kt-ruby").length, 0, "歌词 DOM 不该被改");
-  assert.strictEqual(env.document.querySelectorAll("ul.lyric [data-kt-region]").length, 0, "歌词不该有区域标记");
-  // 浮层应该已经建起来并在跑
-  assert.ok(env.document.getElementById("katakana-terminator-overlay"), "浮层容器应该存在");
-  assert.strictEqual(env.api.config.lyricRender, "overlay");
+
+  const lines = env.document.querySelectorAll("ul.lyric li p");
+  // 含汉字的行：整个让出去，我们一个字节都不碰
+  assert.strictEqual(lines[0].querySelectorAll("ruby.kt-ruby").length, 0, "含汉字的行不该被我们改");
+  assert.strictEqual(baseText(lines[0]), "コーヒーを飲みながら", "含汉字的行保持原样");
+  // 纯假名行：归我们
+  assert.ok(lines[1].querySelectorAll("ruby.kt-ruby").length >= 1, "纯假名行应该被注音");
+
+  assert.strictEqual(env.api.config.lyricRender, "inline");
   assert.strictEqual(env.api.config.scope, "all");
 });
 
-test("歌词 DOM 在浮层模式下逐字节不变（jp-furigana 共存的前提）", async () => {
+test("切到浮层模式后，歌词 DOM 逐字节不变（jp-furigana 共存的前提）", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
+  await sleep(300);
+  // 浮层不再是默认值，但要保证这个选项仍然可用且真的不碰 DOM
+  env.api.set("lyricRender", "overlay");
+  env.api.set("scope", "all");
+  await sleep(300);
   const before = env.document.querySelector("ul.lyric").innerHTML;
   await sleep(600);
   assert.strictEqual(env.document.querySelector("ul.lyric").innerHTML, before, "歌词容器必须一字不变");
+  assert.strictEqual(env.document.querySelectorAll("ul.lyric ruby.kt-ruby").length, 0, "不该往歌词里插 ruby");
+  assert.ok(env.document.getElementById("katakana-terminator-overlay"), "浮层容器应该存在");
 });
 
 test("把范围切成「只标歌词」+ inline 后，歌词会被 DOM 注音", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(300);
-  // 这里要验证的是「直接写进歌词行」那条路，所以显式切到 inline
+  // 这里要验证的是「直接写进歌词行」那条路，所以显式切到 inline。
+  // 注意：inline 模式下含汉字的行整体让给振假名插件，所以断言用的是
+  // 纯片假名行（这正是分工后归我们管的部分）。
   env.api.set("lyricRender", "inline");
   env.api.set("scope", "lyrics");
   await sleep(500);
 
-  const lines = env.document.querySelectorAll("ul.lyric li p");
-  assert.strictEqual(rubyCount(lines[0]), 1, "第一行应该有注音");
-  assert.strictEqual(rubyCount(lines[1]), 1, "第二行应该有注音");
-  assert.strictEqual(rubyCount(lines[2]), 0, "作詞 行不该注音");
+  // 纯片假名的那一行（分工后归我们管）
+  const p = env.document.querySelectorAll("ul.lyric li p")[1];
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "纯片假名行应该被注音");
+  const pairs = [...p.querySelectorAll("ruby.kt-ruby")].map((r) => [
+    r.childNodes[0].nodeValue,
+    r.querySelector(".kt-rt").textContent,
+  ]);
+  assert.ok(
+    pairs.some((x) => x[0] === "ギター" && x[1] === "guitar"),
+    "应该有 ギター -> guitar：" + JSON.stringify(pairs)
+  );
+  assert.strictEqual(baseText(p), "ギターとピアノのセッション", "底字必须保持原文");
 
-  // 注音内容正确
-  const rt = lines[0].querySelector("ruby.kt-ruby .kt-rt");
-  assert.strictEqual(rt.textContent, "coffee");
-  // 底字必须保持原文
-  assert.strictEqual(baseText(lines[0]), "コーヒーを飲みながら");
-  assert.strictEqual(baseText(lines[1]), "コンピューターの前に座る");
+  // 含汉字的那一行让给振假名插件，我们不该碰
+  const kanjiLine = env.document.querySelectorAll("ul.lyric li p")[0];
+  assert.strictEqual(kanjiLine.querySelectorAll("ruby.kt-ruby").length, 0, "含汉字的行必须整个让出去");
 });
 
 test("标题栏（播放栏）里的片假名也被标注", async () => {
@@ -246,10 +264,10 @@ test("断网时依然能用离线词典标注", async () => {
   env.api.set("lyricRender", "inline"); // 这里验证的是 DOM 注音这条路
   env.api.set("scope", "lyrics");
   await sleep(600);
-  // fetch 全程失败，但词典命中的词照样标上
-  const rt = env.document.querySelector("ul.lyric li p ruby.kt-ruby .kt-rt");
+  // fetch 全程失败，但词典命中的词照样标上（用纯片假名行，inline 模式下才归我们）
+  const rt = env.document.querySelectorAll("ul.lyric li p")[1].querySelector("ruby.kt-ruby .kt-rt");
   assert.ok(rt, "应该有用离线词典标出来的注音");
-  assert.strictEqual(rt.textContent, "coffee");
+  assert.strictEqual(rt.textContent, "guitar");
   const stats = env.api.stats();
   assert.ok(stats.dictHits > 0, "应该走了离线词典");
 });

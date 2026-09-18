@@ -204,6 +204,15 @@
     return false;
   }
 
+  // 汉字（含扩展 A 与兼容表意文字）。和 jp-furigana 的 FuriganaCore.hasKanji 同口径：
+  // 用来判断"这行是不是该让给振假名插件"。
+  const RE_KANJI = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
+
+  /** 文本里有没有汉字 */
+  function hasKanji(text) {
+    return typeof text === "string" && RE_KANJI.test(text);
+  }
+
   /**
    * 扫出来的词够不够格拿去翻译。
    * 单字的片假名（「ア」「ン」）绝大多数是助词性的，标英文没意义；
@@ -219,12 +228,14 @@
   return {
     scan: scan,
     hasKatakana: hasKatakana,
+    hasKanji: hasKanji,
     normalize: normalize,
     looksTranslatable: looksTranslatable,
     isKatakana: isKatakana,
     RE_KATAKANA: RE_KATAKANA,
     RE_HALFWIDTH: RE_HALFWIDTH,
     RE_CONTINUE: RE_CONTINUE,
+    RE_KANJI: RE_KANJI,
     HALFWIDTH_MAP: HALFWIDTH_MAP,
   };
 });
