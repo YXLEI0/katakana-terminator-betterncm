@@ -609,6 +609,29 @@ test("注音活了半秒才被重建 = 正常重绘，不该进入认输期", as
   );
 });
 
+test("元素没换、只是注音被抹掉时，age 也要算得出来（否则闸门失效）", async () => {
+  // 2.0.12 引入了"只有刚插上就被毁才算打架"的闸门，但 prior 那条路
+  // （元素还在、注音没了）拿不到记录，只能靠 decidedByHost 里记的注音时刻。
+  // 漏了它的话 age 是 undefined → 闸门失效 → 正常重绘也会被当成打架
+  // → 那一句隔几秒消失一次（用户原话："ジオラマ偶尔在闪"）。
+  const { ctx, doc, p, ann, logs } = fgLine({ churnBaseMs: 30 });
+
+  // 用"元素不换、内容被重写成纯文本"的方式反复模拟正常重绘（每轮相隔足够久）
+  // —— 真机上 RNP 就是这么干的：同一个 div，children 换回纯文本。
+  for (let i = 0; i < 4; i++) {
+    p.textContent = "コーヒーを飲みながら";
+    await sleep(220); // 让"注音活了 ~220ms"这个事实成立
+    ann.pass();
+  }
+
+  assert.strictEqual(
+    logs.filter((l) => l.indexOf("churn 放弃这一行") === 0).length,
+    0,
+    "活了 200ms 以上的重建不该被当成打架：" + JSON.stringify(logs.filter((l) => l.indexOf("churn") === 0))
+  );
+  assert.ok(doc.querySelectorAll("ruby.kt-ruby").length >= 1, "而且注音应该补回来");
+});
+
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
   const { doc, p, ann, logs } = fgLine();
 

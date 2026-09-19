@@ -630,6 +630,9 @@
         plain: text,
         annotated: visibleText(host),
         reAnnotated: !!(prevDecision && prevDecision.plain === text),
+        // 注音时刻。prior 那条路（元素还在、注音没了）拿不到记录，
+        // 只能靠这个算"注音活了多久"，否则 age 是 undefined、闸门失效。
+        at: Date.now(),
       });
 
       if (options.log && records.size <= 40) {
@@ -1235,52 +1238,44 @@
         var prior = hostEl ? decidedByHost.get(hostEl) : null;
         if (prior) {
           /*
-           * 「底字没变」不等于「注音还在」——visibleText() 是不含注音的，
-           * 所以我们的注音被对方抹掉之后，这一比较照样相等。
+           * 「底字没变」不等于「注音还在」—— visibleText() 是不含注音的，
+           * 所以注音被抹掉之后这个比较照样相等。
            *
-           * 真机事故：默认播放页上「クローバー」的英文一直回不来。
-           * RNP 会在同一个元素里重写内容，抹掉我们的 <ruby>；底字一模一样，
-           * 于是这里直接 continue —— 每一轮都跳过，注音永远补不回来。
-           * 所以必须额外确认「注音真的还在」，不能只看文字。
+           * 真机事故：RNP 会在**同一个元素**里重写内容，把我们的 <ruby> 抹掉，
+           * 底字一模一样。以前只看文字就 continue，注音永远回不来
+           * （默认页的クローバー、RNP 页的ジオラマ都是这个形态）。
+           *
+           * 现在只保留一条判断：**注音还在**才算"不用管"。
+           * 注音没了就往下重新注音；要不要继续跟下去，统一交给 churn 计数器
+           * （它按 age 区分"真死循环"和"正常重绘"，见 CHURN_FAST_MS）。
+           * 这里**不再**用 reAnnotated 额外挡一道 —— 两道闸叠起来的结果是
+           * "补两次就永久放弃、又进不了认输期"，用户看到的就是"偶尔闪一下"。
            */
-          if (prior.annotated === visibleNow && hostHasOurRuby(hostEl)) {
+          if (hostHasOurRuby(hostEl)) {
             skipped++;
-            continue; // 注音在位且内容没变，一个字节都不动
+            continue; // 注音在位，一个字节都不动
           }
-          if (prior.annotated === visibleNow && !hostHasOurRuby(hostEl)) {
-            /*
-             * 底字没变、注音却没了 —— 对方在**同一个元素**里把内容重写了一遍
-             * （真机：RNP 分几次补齐歌词行，每次重写都把我们的 <ruby> 抹掉）。
-             *
-             * 以前这里直接 continue，于是注音**永远回不来**（默认页上
-             * 「クローバー」的英文一直不出现就是这个原因）。现在允许补，
-             * 但必须计入 churn：对方要是一直重写，几轮之后就进入认输期停手，
-             * 不会退化成"每轮都重注"的抽搐。
-             */
-            noteChurn(visibleNow, idOf(hostEl), ageOf(hostEl));
-          }
-          if (prior.plain === visibleNow) {
-            // React 丢掉了我们的节点。补一次；但如果补过还是被丢，
-            // 就不再补了 —— 那说明补注音这个动作本身会触发对方重建，
-            // 再补就是无限来回（真机上 18 行每 250ms 一次就是这么来的）。
-            if (prior.reAnnotated) {
-              skipped++;
-              continue;
-            }
-          }
+          noteChurn(
+            visibleNow,
+            idOf(hostEl),
+            typeof prior.at === "number" ? Date.now() - prior.at : ageOf(hostEl)
+          );
         }
 
-        // 已经注过音的行：只有确认失效了才动它。
+        // 已经注过音的行：只有确认「需要动它」才动。
         var rec = records.get(node);
         if (rec) {
-          if (!isStale(rec, node)) continue; // 依然有效，一个字节都不动
-          // 失效了。但要注意：如果 React 已经把我们的节点丢掉/重建，
-          // 那 DOM 里已经没有我们的痕迹了，这时**不需要还原** ——
-          // 「还原」本身是一连串 DOM 变更（摘节点 + 写回文本），
-          // 在真机上就是可见的一闪。直接丢掉记录、往下重新注音即可。
-          // 文本一模一样却判定失效 —— 这是"对方在无条件重建这一行"的特征。
-          // 注意要在 restore / 删记录**之前**判断：restoreRecord 会把原文写回去，
-          // 之后就分不清到底是"文本变了"还是"文本没变"了。
+          var stale = isStale(rec, node);
+          var intact = annotationsIntact(rec);
+          /*
+           * 关键：isStale() 只看"底字有没有变"，而底字是**不含注音**的 ——
+           * 所以"注音被摘掉了、底字没变"这种情况它判定为"依然有效"。
+           * 只看它的话就会永远跳过、注音再也回不来（真机：默认页的クローバー、
+           * RNP 页的ジオラマ，都属于"元素没换、只把 <ruby> 摘掉"）。
+           * 所以"注音还在不在"必须一起看。
+           */
+          if (!stale && intact) continue; // 注音在位、底字没变 —— 一个字节都不动
+          // 要动它了。先记一次 churn（age 够大就不算打架，见 noteChurn）。
           if (rec.plain != null) {
             churnProbe = rec.host;
             churnProbeLine = rec.peerLine;
@@ -1288,10 +1283,13 @@
             churnProbe = null;
             churnProbeLine = null;
           }
-          if (annotationsIntact(rec)) {
+          if (stale && intact) {
+            // 底字真的变了：还原（摘掉注音、写回原文）再重注
             restoreRecord(node, rec);
             restored++;
           } else {
+            // 我们的节点已经不在 DOM 里了，不需要还原 —— 「还原」本身是一连串
+            // DOM 变更，在真机上就是可见的一闪。丢掉记录、往下重新注音即可。
             records.delete(node);
           }
         }
