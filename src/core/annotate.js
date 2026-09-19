@@ -103,7 +103,12 @@
 
     // 装了共存补丁时，含汉字的歌词行也可以标（两种注音同一行）。
     // 默认 false：没打补丁的 jp-furigana 会重建整行，硬标只会互相打架。
-    var coexistWithFurigana = options.coexistWithFurigana === true;
+    // 和 skipKanjiLines 一样允许传函数：这是设置页里的开关，改完必须立刻生效，
+    // 而 annotator 只在初始化时创建一次，所以不能在这里把值抄下来。
+    var coexistOption = options.coexistWithFurigana;
+    function coexistWithFurigana() {
+      return typeof coexistOption === "function" ? !!coexistOption() : coexistOption === true;
+    }
     // 记录我们改过的文本节点： node -> { host, nodes, plain, region }
     var records = new Map();
 
@@ -809,7 +814,7 @@
             lineEl &&
             lineEl.nodeType === 1 &&
             lineHasKanji(lineEl) &&
-            !(coexistWithFurigana && isFuriganaManaged(lineEl))
+            !(coexistWithFurigana() && isFuriganaManaged(lineEl))
           ) {
             kanjiSkipped++;
             continue;

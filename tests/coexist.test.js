@@ -111,3 +111,58 @@ test("重复扫描稳定，不会反复重注", () => {
     assert.strictEqual(r.restored, 0, `第 ${i + 2} 轮不该还原`);
   }
 });
+
+/** 造一个"已被 jp-furigana 接管"的含汉字歌词行 */
+function managedKanjiLine(ctx) {
+  const li = ctx.document.querySelectorAll("ul.lyric li")[0];
+  li.classList.add("fg-line"); // jp-furigana 给自己的行打的标记
+  return li;
+}
+
+function annotator(ctx, coexist) {
+  return ctx.KTAnnotate.createAnnotator({
+    document: ctx.document,
+    lookup: (w) => ctx.translator.lookup(w),
+    annotateAll: true,
+    skipKanjiLines: true,
+    coexistWithFurigana: coexist,
+  });
+}
+
+test("打开共存后，含汉字的行也能标上（同一行两种注音）", () => {
+  const ctx = loadCore(HTML);
+  forceRubyLayout(ctx, true);
+  const li = managedKanjiLine(ctx);
+  annotator(ctx, true).pass();
+
+  const p = li.querySelector("p");
+  const pairs = [...p.querySelectorAll("ruby.kt-ruby")].map((r) => [
+    r.childNodes[0].nodeValue,
+    r.querySelector(".kt-rt").textContent,
+  ]);
+  assert.ok(
+    pairs.some((x) => x[0] === "ヒーロー" && x[1] === "hero"),
+    "共存模式下含汉字的行也该标片假名：" + JSON.stringify(pairs)
+  );
+  assert.ok(p.textContent.startsWith("取とり戻もどしたい"), "底字必须完整：" + p.textContent);
+});
+
+test("共存开关传函数时每轮重算——设置改完不用重启就生效", () => {
+  const ctx = loadCore(HTML);
+  forceRubyLayout(ctx, true);
+  const li = managedKanjiLine(ctx);
+  let on = false;
+  const ann = annotator(ctx, () => on);
+
+  ann.pass();
+  const p = li.querySelector("p");
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "关着的时候含汉字的行要整个让出去");
+
+  on = true;
+  ann.restoreAll();
+  ann.pass();
+  assert.ok(
+    p.querySelectorAll("ruby.kt-ruby").length >= 1,
+    "开关打开后，下一轮扫描就该标上（不能只在初始化时读一次）"
+  );
+});

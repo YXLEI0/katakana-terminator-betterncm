@@ -683,8 +683,11 @@
         // 会互相重建，来回闪烁。纯假名行没有振假名可注，本来就没有冲突。
         // 打了共存补丁后打开 coexistWithFurigana，同一行上两种注音才能并存。
         skipKanjiLines: true,
-        // 打了共存补丁后才允许在含汉字的行上也注音（两种注音同一行）
-        coexistWithFurigana: !!config.coexistWithFurigana,
+        // 打了共存补丁后才允许在含汉字的行上也注音（两种注音同一行）。
+        // 传函数而不是布尔值：这是设置页里的开关，改了要立刻生效。
+        coexistWithFurigana: function () {
+          return !!config.coexistWithFurigana;
+        },
         log: function () {
           // 走 trace：注音明细只在出问题时才有价值，默认不进 console，但一定要留痕
           trace("annotate", Array.prototype.join.call(arguments, " "));
