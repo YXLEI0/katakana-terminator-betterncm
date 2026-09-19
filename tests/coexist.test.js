@@ -367,6 +367,11 @@ test("对手无条件重建时，插件会认输停手，而不是无限对打",
     logs.some((l) => l.indexOf("churn 放弃这一行") === 0),
     "对打到阈值后应该主动认输，并留下轨迹：" + JSON.stringify(logs.slice(-3))
   );
+  // 诊断必须真的读到对端状态：宿主在 dropDetached 里已经脱链，
+  // 所以要靠注音时存下来的行元素，不能顺着脱链的宿主往上找（那样只会输出"无标记"）
+  const churnLine = logs.find((l) => l.indexOf("churn 放弃这一行") === 0);
+  assert.ok(churnLine.indexOf("peer{") > 0, "churn 日志应该带上对端状态：" + churnLine);
+  assert.ok(churnLine.indexOf("peer=无标记") < 0, "不能退化成读不到行元素：" + churnLine);
 
   // 认输之后对方再怎么重建，我们也不再跟着注 —— 这就是"停手"
   let after = 0;

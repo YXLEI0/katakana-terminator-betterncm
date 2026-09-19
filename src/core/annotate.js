@@ -268,8 +268,9 @@
       churnPrune();
     }
 
-    // noteChurn 调用时传给 describePeer 的探针元素（宿主还在手上，能顺着往上找到行）
+    // noteChurn 调用时传给 describePeer 的探针（宿主脱链前抓下来的行元素）
     var churnProbe = null;
+    var churnProbeLine = null;
 
     /**
      * 诊断用：把 jp-furigana **自己**的状态读出来，看它为什么会重建这一行。
@@ -283,10 +284,23 @@
      *             <ruby> 污染：它求和用的是 host.__fgOrig 的 textContent，
      *             我们的 rt 文字会被算进去，于是这一行永远"不干净"、永远重建
      */
+    /**
+     * 顺着祖先找一个 jp-furigana 标过的行（它会给行挂 __fgText）。
+     * 必须在元素还挂在文档里的时候调用 —— 脱链之后就找不到了。
+     */
+    function enclosingPeerLine(el) {
+      for (var p = el; p && p !== doc.body; p = p.parentElement) {
+        if (p.__fgText != null) return p;
+      }
+      return null;
+    }
+
     function describePeer(el) {
       try {
-        var line = el;
-        while (line && line.__fgText == null && line.parentElement) line = line.parentElement;
+        // 优先用注音时存下来的行元素；调用时传进来的 host 往往已经脱链了
+        var line = (churnProbeLine && churnProbeLine.__fgText != null)
+          ? churnProbeLine
+          : enclosingPeerLine(el);
         if (!line || line.__fgText == null) return "peer=无标记";
         var hosts = line.__fgHosts || [];
         var noWrap = 0;
@@ -530,6 +544,10 @@
         region: region,
         kept: !leadIsRuby,
         index: origIndex,
+        // 记下当时所在的行元素（jp-furigana 会给它挂 __fgText）。
+        // 只能在注音时抓：等到出问题（宿主被摘掉）再顺着 host 往上找就已经晚了，
+        // 那时 host 已经脱链，parentElement 全是 null，诊断只能输出"无标记"。
+        peerLine: enclosingPeerLine(host),
       });
       // 记下"这个 host 的这段内容已经注过音了"，两种可见形态都记，
       // 因为 React 丢掉我们插的节点前后，可见底字不一样。
@@ -791,8 +809,10 @@
         // 真机轨迹里 restored 全部来自这里（一条"失效[...]"都没有），
         // 说明闪烁的形态就是"宿主被反复删掉重建"，而不是判定逻辑出错。
         churnProbe = rec.host;
+        churnProbeLine = rec.peerLine;
         noteChurn(rec.plain, idOf(rec.host));
         churnProbe = null;
+        churnProbeLine = null;
         records.delete(dead[i]);
       }
       return dead.length;
@@ -1129,8 +1149,10 @@
           // 之后就分不清到底是"文本变了"还是"文本没变"了。
           if (rec.plain != null) {
             churnProbe = rec.host;
+            churnProbeLine = rec.peerLine;
             noteChurn(rec.plain, idOf(rec.host));
             churnProbe = null;
+            churnProbeLine = null;
           }
           if (annotationsIntact(rec)) {
             restoreRecord(node, rec);
