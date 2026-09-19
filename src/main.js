@@ -172,6 +172,8 @@
     tickTimer: null,
     applied: false,
     lastPassMs: 0,
+    lastPassAt: 0,
+    timerIsRaf: false,
     lastResult: null,
     error: null,
     betterncmVersion: null,
@@ -264,17 +266,50 @@
       // 我们自己造成的变更；把记录队列清空，否则会自激成死循环。
       if (state.observer) state.observer.takeRecords();
       state.lastPassMs = Math.round(performance.now() - t0);
+      state.lastPassAt = Date.now();
     }
     state.consecutiveErrors = 0;
   }
 
-  /** 合并短时间内的多次触发，最多排一个待执行的 pass */
+  /**
+   * 合并短时间内的多次触发，最多排一个待执行的 pass。
+   *
+   * delay=0 表示「观测到 DOM 变了，要立刻补注音」。这种情况必须**赶在下一帧
+   * 绘制之前**跑完，否则那一帧画出来就是没有注音的样子 —— 肉眼就是一闪。
+   * 真机轨迹里量到：RNP 歌词行出现后会分几次补齐（罗马音层陆续到达），
+   * 每次都让 jp-furigana 重建该行，我们的注音 age≈500ms 就被毁一次；
+   * 而重扫延迟 250ms（≈15 帧）就足以让这一闪被看见。所以走 requestAnimationFrame。
+   *
+   * 仍然保留最小间隔，避免自己在同一帧里反复触发把自己拖成风暴。
+   */
+  var MIN_PASS_GAP_MS = 40;
   function schedule(delay) {
     if (state.timer) return;
-    state.timer = setTimeout(function () {
+    var d = delay == null ? 250 : delay;
+    if (d > 0) {
+      state.timer = setTimeout(function () {
+        state.timer = null;
+        pass();
+      }, d);
+      return;
+    }
+    var since = Date.now() - (state.lastPassAt || 0);
+    var wait = since < MIN_PASS_GAP_MS ? MIN_PASS_GAP_MS - since : 0;
+    var run = function () {
       state.timer = null;
       pass();
-    }, delay == null ? 250 : delay);
+    };
+    if (wait > 0) {
+      state.timer = setTimeout(run, wait);
+      return;
+    }
+    if (typeof requestAnimationFrame === "function") {
+      // 下一帧绘制前执行 —— 这一帧画出来时注音已经补回去了
+      state.timer = requestAnimationFrame(run);
+      state.timerIsRaf = true;
+    } else {
+      state.timer = setTimeout(run, 0);
+    }
   }
 
   function startObserver() {
@@ -290,7 +325,7 @@
             break;
           }
         }
-        if (relevant) schedule();
+        if (relevant) schedule(0);
       } catch (e) {
         warn("MutationObserver 回调异常", e);
       }
@@ -322,8 +357,12 @@
   function disable() {
     state.applied = false;
     if (state.timer) {
+      // 可能是 rAF 的 id：clearTimeout 对它无效，但那只是多跑一次 pass，
+      // 而 pass 开头会检查 enabled，不会有副作用。两个都清一遍更省心。
       clearTimeout(state.timer);
+      if (state.timerIsRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(state.timer);
       state.timer = null;
+      state.timerIsRaf = false;
     }
     if (state.annotator) state.annotator.restoreAll();
   }

@@ -713,6 +713,22 @@
     }
 
     /**
+     * 这个宿主里还有没有我们的注音。
+     *
+     * 和 annotationsIntact(rec) 的区别：那个查的是"某条记录里的节点还在不在"，
+     * 这里查的是"DOM 里到底还有没有 kt-ruby"。后者才回答得了
+     * 「底字没变，但注音是不是被对方抹掉了」—— 见 pass() 里 prior 那一段。
+     *
+     * 刻意**不做缓存**：对方随时可能把我们的节点抹掉，缓存成 true 就会让上面
+     * 那个判断重新退化成 bug。调用点只有一处，且只在"底字恰好没变"时才会走到，
+     * 开销可以接受。
+     */
+    function hostHasOurRuby(host) {
+      if (!host || host.nodeType !== 1 || !host.querySelector) return false;
+      return !!host.querySelector("ruby.kt-ruby");
+    }
+
+    /**
      * 这个区域是不是「歌词行」。
      * 只有歌词行才需要按"含不含汉字"和振假名插件分工 ——
      * 播放栏的歌曲名/歌手它根本不管，含汉字也照标。
@@ -1183,9 +1199,30 @@
 
         var prior = hostEl ? decidedByHost.get(hostEl) : null;
         if (prior) {
-          if (prior.annotated === visibleNow) {
+          /*
+           * 「底字没变」不等于「注音还在」——visibleText() 是不含注音的，
+           * 所以我们的注音被对方抹掉之后，这一比较照样相等。
+           *
+           * 真机事故：默认播放页上「クローバー」的英文一直回不来。
+           * RNP 会在同一个元素里重写内容，抹掉我们的 <ruby>；底字一模一样，
+           * 于是这里直接 continue —— 每一轮都跳过，注音永远补不回来。
+           * 所以必须额外确认「注音真的还在」，不能只看文字。
+           */
+          if (prior.annotated === visibleNow && hostHasOurRuby(hostEl)) {
             skipped++;
             continue; // 注音在位且内容没变，一个字节都不动
+          }
+          if (prior.annotated === visibleNow && !hostHasOurRuby(hostEl)) {
+            /*
+             * 底字没变、注音却没了 —— 对方在**同一个元素**里把内容重写了一遍
+             * （真机：RNP 分几次补齐歌词行，每次重写都把我们的 <ruby> 抹掉）。
+             *
+             * 以前这里直接 continue，于是注音**永远回不来**（默认页上
+             * 「クローバー」的英文一直不出现就是这个原因）。现在允许补，
+             * 但必须计入 churn：对方要是一直重写，几轮之后就进入认输期停手，
+             * 不会退化成"每轮都重注"的抽搐。
+             */
+            noteChurn(visibleNow, idOf(hostEl));
           }
           if (prior.plain === visibleNow) {
             // React 丢掉了我们的节点。补一次；但如果补过还是被丢，

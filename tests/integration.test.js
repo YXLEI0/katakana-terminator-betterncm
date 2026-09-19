@@ -251,6 +251,29 @@ test("断网时依然能用离线词典标注", async () => {
   assert.ok(stats.dictHits > 0, "应该走了离线词典");
 });
 
+test("对方把注音抹掉后，必须在下一帧之前补回来（不能等 250ms 才补）", async () => {
+  // 真机轨迹里的现场：RNP 歌词行出现后会分几次补齐（罗马音层陆续到达），
+  // 每次都让 jp-furigana 重建该行，我们的注音 age≈500ms 就被毁一次。
+  // 而重扫以前要等 250ms（≈15 帧）—— 那一闪就是这么被看见的。
+  const env = bootPlugin(NCM_HTML);
+  await env.runLoad();
+  await sleep(600);
+
+  const line = env.document.querySelectorAll("ul.lyric li p")[1];
+  assert.ok(line.querySelectorAll("ruby.kt-ruby").length >= 1, "前提：先注上音");
+
+  // 模拟对方重建这一段：把这一行的内容换成纯文本（我们的注音随之消失）
+  line.textContent = "ギターとピアノのセッション";
+
+  // 只等一帧多一点的时间：如果重扫还是 250ms 的防抖，这里必然还没补上
+  await sleep(60);
+  assert.ok(
+    line.querySelectorAll("ruby.kt-ruby").length >= 1,
+    "应该在本帧内就补回来（等了 60ms 仍没有，说明还在走 250ms 防抖）"
+  );
+  assert.strictEqual(baseText(line), "ギターとピアノのセッション", "底字必须保持原文");
+});
+
 test("设置面板能构建出来，控件反映当前配置，链接交给系统浏览器", () => {
   const env = bootPlugin(NCM_HTML);
   const root = env.listeners.config[0]();

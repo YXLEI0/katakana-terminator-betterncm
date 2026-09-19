@@ -383,8 +383,12 @@ test("React 整棵子树重建时不能把旧节点插回去（会渲染两遍�
 
   // 底线：底字绝不能重复（旧节点被插回去就会两遍）
   assert.strictEqual(baseText(p), original, "底字不能重复");
-  // 文字没变，所以按"同一段文字只处理一次"的规则不再重注
-  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "文字没变就不重注，避免抽搐");
+  // 文字没变时允许补一次（对方可能把注音抹掉了），但必须有界、之后停手 ——
+  // 无界重注就是当年那个"每 250ms 抽搐一次"。见下面那条测试。
+  assert.ok(
+    p.querySelectorAll("ruby.kt-ruby").length <= 1,
+    "最多补一次，不能一次插两个"
+  );
 });
 
 test("不修改任何既有元素的 class（避免触发其它歌词插件的重建）", () => {
@@ -457,10 +461,13 @@ test("隐藏的歌词副本不标注（换歌时上一首残留的容器）", ()
   }
 });
 
-test("React 每轮都用同样的文字重建整行时，不能每轮都重注（真机抽搐的原因）", () => {
-  // 轨迹实测：网易云/RNP 会让 18 行歌词每 250ms 重建一次，
-  // 文字一模一样却整行换新。旧实现把新文本节点当成"新的一行"重新注音，
-  // React 一重建我们注一次，永远不收敛 —— 这就是"一直抽搐"。
+test("React 每轮都用同样的文字重建整行时，必须很快停手（真机抽搐的原因）", () => {
+  // 轨迹实测：网易云/RNP 会让歌词行反复重建，文字一模一样却整行换新。
+  // 早年的实现把新文本节点当成"新的一行"重新注音，永远不收敛 —— 一直抽搐。
+  //
+  // 现在的契约不是"文字没变就绝不重注"（那会让被抹掉的注音永远回不来，
+  // 真机事故：默认页上「クローバー」的英文一直不出现），而是
+  // **有界重试**：允许补，但几轮之内必须停手。
   const ctx = loadCore(
     `<!doctype html><html><body><ul class="lyric"><li class="line"><p>コーヒーを飲みながら</p></li></ul></body></html>`
   );
@@ -472,16 +479,23 @@ test("React 每轮都用同样的文字重建整行时，不能每轮都重注�
   assert.ok(li.querySelectorAll("ruby.kt-ruby").length >= 1, "先注上音");
 
   // 模拟 React：整行元素保留，内部子节点全部换成新的（文字不变）
-  for (let round = 1; round <= 4; round++) {
+  let total = 0;
+  let stoppedAt = -1;
+  for (let round = 1; round <= 8; round++) {
     const p = li.querySelector("p");
     const text = baseText(p); // 可见原文
     while (p.firstChild) p.removeChild(p.firstChild);
     p.appendChild(ctx.document.createTextNode(text));
 
     const r = ann.pass();
-    assert.strictEqual(r.changed, 0, `第 ${round} 轮不该重新注音（文字没变）`);
+    total += r.changed;
     assert.strictEqual(r.restored, 0, `第 ${round} 轮不该还原`);
+    assert.strictEqual(baseText(p), text, `第 ${round} 轮底字不能重复`);
+    if (r.changed === 0 && stoppedAt < 0) stoppedAt = round;
   }
+
+  assert.ok(total <= 4, "重注次数必须有界，不能每轮都重注（实际 " + total + " 次）");
+  assert.ok(stoppedAt > 0, "必须在若干轮之内收敛成 0 改动");
 });
 
 test("文字真的变了才重新注音", () => {
