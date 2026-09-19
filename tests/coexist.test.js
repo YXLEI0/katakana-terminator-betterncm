@@ -438,6 +438,44 @@ test("认输只是暂时的：对方不再重建之后，注音要自己回来",
   assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "注音应该留着");
 });
 
+test("来回打第三次就长时间让开 —— 不能隔几秒闪一下", async () => {
+  // 用户反馈："只有ジオラマ在闪，其他正常"。根因是退避按 4 倍递增
+  // （2s→8s→32s→2min），每次重试都让那个片段再闪一下。
+  // 现在的策略：第一次认输退 2s 给一次机会，之后直接顶到 10 分钟。
+  const { doc, p, ann, logs } = fgLine({ churnBaseMs: 30 });
+
+  // 第一轮：打架 → 认输（退 30ms）
+  fgApplyWrap(doc, p, SEGMENTS);
+  for (let i = 0; i < 4; i++) {
+    ann.pass();
+    fgRestoreUnpatched(p);
+    fgApplyWrap(doc, p, SEGMENTS);
+  }
+  assert.strictEqual(
+    logs.filter((l) => /churn 放弃这一行 0s/.test(l)).length >= 1,
+    true,
+    "第一次认输应该只退很短（测试里 30ms ≈ 0s）：" + JSON.stringify(logs.slice(-2))
+  );
+
+  // 退避到期 → 重试一次 → 又打起来 → 这次应该直接退到上限 10 分钟
+  await sleep(60);
+  for (let i = 0; i < 4; i++) {
+    ann.pass();
+    fgRestoreUnpatched(p);
+    fgApplyWrap(doc, p, SEGMENTS);
+  }
+  assert.ok(
+    logs.some((l) => /churn 放弃这一行 600s/.test(l)),
+    "第二次认输应该直接退到上限：" + JSON.stringify(logs.slice(-3))
+  );
+
+  // 之后 200ms（远大于第一次的 30ms）内绝不能再重试
+  await sleep(200);
+  let after = 0;
+  for (let i = 0; i < 4; i++) after += ann.pass().changed + ann.pass().restored;
+  assert.strictEqual(after, 0, "长时间退避期内不该再碰它（changed+restored=" + after + "）");
+});
+
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
   const { doc, p, ann, logs } = fgLine();
 

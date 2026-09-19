@@ -235,9 +235,24 @@
         return;
       }
       c.strikes++;
-      var wait = Math.min(CHURN_BASE_MS * Math.pow(4, c.strikes - 1), CHURN_MAX_MS);
+      /*
+       * 退避策略：第一次认输只退 2s（给对方"其实只是正在唱那一两秒"的机会，
+       * 唱完补上就稳了）；**第二次起直接顶到上限 10 分钟**。
+       *
+       * 为什么不继续按 4 倍递增（2s→8s→32s→2min→10min）：那样每次重试都会让
+       * 那个片段再闪一下，用户看到的是"隔几秒闪一下、隔几秒闪一下"——
+       * 真机反馈正是"只有ジオラマ在闪，其他正常"。一次机会足够区分两种情况：
+       * 真能稳的，2s 后就稳了；稳不了的，再试也没用，索性长时间让开。
+       */
+      var wait = c.strikes === 1 ? CHURN_BASE_MS : CHURN_MAX_MS;
       churnUntil.set(text, now + wait);
-      churnByText.delete(text);
+      /*
+       * 注意：这里**不能**把记录删掉。strikes 必须跨退避留着，否则下次
+       * 重新计数时它又从 0 开始 —— 于是"已经判过它爱打架"永远不成立、
+       * 退避也永远停在第 1 档（2.0.5 的实际 bug：每 2s 就再闪一下）。
+       * 只把窗口计数清零，保留 strikes。
+       */
+      churnByText.set(text, { count: 0, since: now, strikes: c.strikes });
       if (options.log) {
         options.log(
           "churn 放弃这一行 " +
@@ -245,10 +260,82 @@
             "s（注音反复被重建掉" +
             (where ? "，宿主 " + where : "") +
             "）文本=" +
-            JSON.stringify(String(text).slice(0, 40))
+            JSON.stringify(String(text).slice(0, 40)) +
+            " " +
+            describePeer(churnProbe)
         );
       }
       churnPrune();
+    }
+
+    // noteChurn 调用时传给 describePeer 的探针元素（宿主还在手上，能顺着往上找到行）
+    var churnProbe = null;
+
+    /**
+     * 诊断用：把 jp-furigana **自己**的状态读出来，看它为什么会重建这一行。
+     *
+     * 只读别人的 expando，不改任何东西。要回答的是它 isClean() 里那几条判据
+     * 到底哪条不成立 —— 光看我们自己的轨迹猜不出来：
+     *   dirty     它自己标脏了（有 DOM 变更被它当成"行被外人改过"）
+     *   无wrap    有宿主没挂着它的 wrap（那它会重建）
+     *   ktOwn     按它的口径数"属于自己的子节点"，正常应该恰好是 1
+     *   原文一致  hostsText(line) === line.__fgText —— 这条最容易被我们的
+     *             <ruby> 污染：它求和用的是 host.__fgOrig 的 textContent，
+     *             我们的 rt 文字会被算进去，于是这一行永远"不干净"、永远重建
+     */
+    function describePeer(el) {
+      try {
+        var line = el;
+        while (line && line.__fgText == null && line.parentElement) line = line.parentElement;
+        if (!line || line.__fgText == null) return "peer=无标记";
+        var hosts = line.__fgHosts || [];
+        var noWrap = 0;
+        var orig = "";
+        for (var i = 0; i < hosts.length; i++) {
+          var h = hosts[i];
+          if (!h.isConnected || !h.__fgWrap || h.__fgWrap.parentNode !== h) noWrap++;
+          var o = h.__fgOrig || [];
+          for (var j = 0; j < o.length; j++) orig += o[j].textContent || "";
+        }
+        var fg = String(line.__fgText == null ? "" : line.__fgText);
+        var same = orig === fg;
+        return (
+          "peer{dirty=" +
+          !!line.__fgDirty +
+          " hosts=" +
+          hosts.length +
+          " 无wrap=" +
+          noWrap +
+          " mirrors=" +
+          ((line.__fgMirrors || []).length) +
+          " ktOwn=" +
+          (hosts.length ? ownChildCountLikePeer(hosts[0]) : "-") +
+          " 原文一致=" +
+          same +
+          (same ? "" : " orig=" + JSON.stringify(orig.slice(0, 24)) + " fgText=" + JSON.stringify(fg.slice(0, 24))) +
+          "}"
+        );
+      } catch (e) {
+        return "peer=err:" + ((e && e.message) || e);
+      }
+    }
+
+    /** 按 jp-furigana 打补丁后的口径数"属于它的"子节点（正常恰好 1 个 wrap） */
+    function ownChildCountLikePeer(h) {
+      var n = 0;
+      for (var i = 0; i < h.childNodes.length; i++) {
+        var c = h.childNodes[i];
+        if (c.nodeType === 1) {
+          var cls = typeof c.className === "string" ? c.className : "";
+          if (/(^|\s)(kt-ruby|kt-rt|kt-ov-label)(\s|$)/.test(cls)) continue;
+          if (c.tagName === "RT" && c.parentNode) {
+            var pc = typeof c.parentNode.className === "string" ? c.parentNode.className : "";
+            if (/(^|\s)kt-ruby(\s|$)/.test(pc)) continue;
+          }
+        }
+        n++;
+      }
+      return n;
     }
 
     var decidedByHost = new WeakMap();
@@ -703,7 +790,9 @@
         // 宿主整个被摘掉 = 我们刚注的那段文字连同容器一起被对方丢弃了。
         // 真机轨迹里 restored 全部来自这里（一条"失效[...]"都没有），
         // 说明闪烁的形态就是"宿主被反复删掉重建"，而不是判定逻辑出错。
+        churnProbe = rec.host;
         noteChurn(rec.plain, idOf(rec.host));
+        churnProbe = null;
         records.delete(dead[i]);
       }
       return dead.length;
@@ -1038,7 +1127,11 @@
           // 文本一模一样却判定失效 —— 这是"对方在无条件重建这一行"的特征。
           // 注意要在 restore / 删记录**之前**判断：restoreRecord 会把原文写回去，
           // 之后就分不清到底是"文本变了"还是"文本没变"了。
-          if (rec.plain != null) noteChurn(rec.plain, idOf(rec.host));
+          if (rec.plain != null) {
+            churnProbe = rec.host;
+            noteChurn(rec.plain, idOf(rec.host));
+            churnProbe = null;
+          }
           if (annotationsIntact(rec)) {
             restoreRecord(node, rec);
             restored++;
