@@ -149,8 +149,12 @@ test("注入 5 个文件后，插件注册了 onLoad / onConfig", async () => {
   assert.strictEqual(env.api, env.window.KatakanaTerminator);
 });
 
-test("默认：含汉字的歌词行让给振假名插件，纯假名行归我们", async () => {
-  const env = bootPlugin(NCM_HTML);
+test("没有振假名插件时，含汉字的歌词行也要标（不能因为「有汉字」就整行让开）", async () => {
+  // 真机事故：用户关掉 jp-furigana 之后，默认播放页整页没有注音，
+  // RNP 页只有唯一不含汉字的那一行有注音。原因是让位条件写成了
+  // `hasKanji && !(coexist && managed)` —— 共存开关默认关着，
+  // 于是"有汉字"就等于"整行让开"，哪怕对方根本没管这一行。
+  const env = bootPlugin(NCM_HTML); // 这个 DOM 里没有任何 jp-furigana 标记
   await env.runLoad();
   await sleep(600);
 
@@ -158,25 +162,36 @@ test("默认：含汉字的歌词行让给振假名插件，纯假名行归我�
   assert.ok(env.document.querySelectorAll(".m-playbar ruby.kt-ruby").length > 0, "播放栏应该被标注");
 
   const lines = env.document.querySelectorAll("ul.lyric li p");
-  // 含汉字的行：整个让出去，我们一个字节都不碰
-  assert.strictEqual(lines[0].querySelectorAll("ruby.kt-ruby").length, 0, "含汉字的行不该被我们改");
-  assert.strictEqual(baseText(lines[0]), "コーヒーを飲みながら", "含汉字的行保持原样");
-  // 纯假名行：归我们
+  // 含汉字的行：对方没管，就该我们标
+  assert.ok(lines[0].querySelectorAll("ruby.kt-ruby").length >= 1, "对方没管的含汉字行应该被注音");
+  assert.strictEqual(baseText(lines[0]), "コーヒーを飲みながら", "底字必须保持原样");
+  // 纯假名行：也归我们
   assert.ok(lines[1].querySelectorAll("ruby.kt-ruby").length >= 1, "纯假名行应该被注音");
 
   assert.strictEqual(env.api.config.scope, "all");
+});
+
+test("振假名插件接管了这一行时，含汉字的行整个让给它", async () => {
+  const env = bootPlugin(NCM_HTML);
+  await env.runLoad();
+  await sleep(300);
+  // 模拟 jp-furigana 已经处理过这一行（它会给行挂 __fgText）
+  env.document.querySelectorAll("ul.lyric li")[0].__fgText = "コーヒーを飲みながら";
+  env.api.set("scope", "lyrics");
+  await sleep(500);
+
+  const kanjiLine = env.document.querySelectorAll("ul.lyric li p")[0];
+  assert.strictEqual(kanjiLine.querySelectorAll("ruby.kt-ruby").length, 0, "对方管的行必须整个让出去");
+  assert.strictEqual(baseText(kanjiLine), "コーヒーを飲みながら", "而且一个字节都不能改");
 });
 
 test("把范围切成「只标歌词」后，纯假名歌词会被 DOM 注音", async () => {
   const env = bootPlugin(NCM_HTML);
   await env.runLoad();
   await sleep(300);
-  // 含汉字的行整体让给振假名插件，所以断言用的是纯片假名行
-  // （这正是按行分工后归我们管的部分）。
   env.api.set("scope", "lyrics");
   await sleep(500);
 
-  // 纯片假名的那一行（分工后归我们管）
   const p = env.document.querySelectorAll("ul.lyric li p")[1];
   assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "纯片假名行应该被注音");
   const pairs = [...p.querySelectorAll("ruby.kt-ruby")].map((r) => [
@@ -188,10 +203,6 @@ test("把范围切成「只标歌词」后，纯假名歌词会被 DOM 注音", 
     "应该有 ギター -> guitar：" + JSON.stringify(pairs)
   );
   assert.strictEqual(baseText(p), "ギターとピアノのセッション", "底字必须保持原文");
-
-  // 含汉字的那一行让给振假名插件，我们不该碰
-  const kanjiLine = env.document.querySelectorAll("ul.lyric li p")[0];
-  assert.strictEqual(kanjiLine.querySelectorAll("ruby.kt-ruby").length, 0, "含汉字的行必须整个让出去");
 });
 
 test("标题栏（播放栏）里的片假名也被标注", async () => {

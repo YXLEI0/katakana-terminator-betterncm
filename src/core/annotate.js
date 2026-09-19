@@ -190,6 +190,17 @@
     var CHURN_BASE_MS = typeof options.churnBaseMs === "number" ? options.churnBaseMs : 1000;
     var CHURN_MAX_MS = 600000; // 退避上限
     /*
+     * 只有「刚插上就被毁」才算打架。
+     *
+     * 真机数据把两类现象分得很清楚：
+     *   age=223ms / 435ms / 543ms  —— RNP 分几次补齐歌词行，属于正常重绘
+     *   age≈0~几十 ms              —— 对方在无条件重建，注什么秒毁什么（真死循环）
+     * 配合 2.0.11 的"下一帧前补回来"，正常重绘的重建根本看不见，补一次几乎免费，
+     * 所以**不该为它认输**（认输会让那一句十几秒没有英文 —— 用户看到的就是
+     * "RNP 页的ジオラマ一直没注音"）。只有真死循环才值得退避。
+     */
+    var CHURN_FAST_MS = 150;
+    /*
      * 原谅期：这么久没有再打架，就把 strikes 清零。
      * 否则一段文字一旦被打过一次，之后每次重试都只给 1 轮机会、退避起点也更高，
      * 于是一首歌里只会越来越容易被判成"打架"。
@@ -228,9 +239,20 @@
       return false;
     }
 
+    /** 注音插上去多久了（毫秒）；没记过就返回 undefined */
+    function ageOf(host) {
+      if (!host || typeof host.__ktAt !== "number") return undefined;
+      return Date.now() - host.__ktAt;
+    }
+
     /** 记一次"文本没变但注音失效"；到达阈值就进入退避 */
-    function noteChurn(text, where) {
+    function noteChurn(text, where, ageMs) {
       if (!text) return;
+      /*
+       * 活够久才被重建 = 正常重绘，不是打架：不计数。
+       * （补回来只要一帧，看不见；而认输会让那一句长时间没有英文。）
+       */
+      if (typeof ageMs === "number" && ageMs >= CHURN_FAST_MS) return;
       var now = Date.now();
       var c = churnByText.get(text);
       if (!c || now - c.since > CHURN_WINDOW_MS) c = { count: 0, since: now, strikes: (c && c.strikes) || 0 };
@@ -274,8 +296,7 @@
             "）文本=" +
             JSON.stringify(String(text).slice(0, 40)) +
             " age=" +
-            (churnProbe && churnProbe.__ktAt ? Date.now() - churnProbe.__ktAt + "ms" : "?") +
-            " " +
+            (churnProbe && churnProbe.__ktAt ? Date.now() - churnProbe.__ktAt + "ms" : "?") +            " " +
             describePeer(churnProbe)
         );
       }
@@ -878,7 +899,7 @@
         // 说明闪烁的形态就是"宿主被反复删掉重建"，而不是判定逻辑出错。
         churnProbe = rec.host;
         churnProbeLine = rec.peerLine;
-        noteChurn(rec.plain, idOf(rec.host));
+        noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host));
         churnProbe = null;
         churnProbeLine = null;
         records.delete(dead[i]);
@@ -1129,8 +1150,9 @@
         }
         if (!region.isConnected || !isVisible(region)) continue;
 
-        // 按「行」分工：含汉字的**歌词行**整个让给振假名插件（见 skipKanjiLines 说明）。
-        // 只对歌词行生效 —— 播放栏的歌曲名/歌手它不管，含汉字也要照标。
+        // 按「行」分工：**jp-furigana 正在管的**含汉字歌词行整个让给它
+        // （见 skipKanjiLines 说明）。只对歌词行生效 —— 播放栏的歌曲名/歌手
+        // 它不管，含汉字也要照标。
         // 必须在行级别判断并尽早 continue：只跳过半个行，会让这一行其余部分
         // 仍被我们改写，等于又去碰别人管的元素。
         if (shouldSkipKanjiLines() && isLyricRegion(region)) {
@@ -1140,13 +1162,26 @@
             if (lineEl.tagName === "LI" || /\bline\b|lyric-line/.test(cn)) break;
             lineEl = lineEl.parentNode;
           }
-          // 例外：装了共存补丁的 jp-furigana 能容忍我们，含汉字的行也照标。
-          // 判据是它自己的标记；没打补丁时遇到它管的行仍然让开（否则互相重建）。
+          /*
+           * 让位的条件是**三条同时成立**：含汉字、对方正在管这一行、共存开关没开。
+           *
+           * 以前写的是 `hasKanji && !(coexist && managed)`，展开等于
+           * `hasKanji && (!coexist || !managed)` —— 只要共存开关是关的（默认就是关的），
+           * 含汉字的行就一律让开，**哪怕 jp-furigana 根本没管这一行**
+           * （被关掉、没装、或者还没来得及处理）。
+           *
+           * 真机事故：用户关掉 jp-furigana 之后，默认播放页整页没有注音，
+           * RNP 页只有「いざなったクローバー」这一句（唯一不含汉字的行）有注音。
+           * 轨迹里 `汉字让位 peer管=false` 出现了 400+ 次，就是它在整行整行地漏标。
+           *
+           * 对方没在管的行跟我们没有冲突，没有理由让。
+           */
           if (
             lineEl &&
             lineEl.nodeType === 1 &&
             lineHasKanji(lineEl) &&
-            !(coexistWithFurigana() && isFuriganaManaged(lineEl))
+            isFuriganaManaged(lineEl) &&
+            !coexistWithFurigana()
           ) {
             kanjiSkipped++;
             // 让位的原因一定要写下来：到底是"对方管着这一行"（正常让位），
@@ -1222,7 +1257,7 @@
              * 但必须计入 churn：对方要是一直重写，几轮之后就进入认输期停手，
              * 不会退化成"每轮都重注"的抽搐。
              */
-            noteChurn(visibleNow, idOf(hostEl));
+            noteChurn(visibleNow, idOf(hostEl), ageOf(hostEl));
           }
           if (prior.plain === visibleNow) {
             // React 丢掉了我们的节点。补一次；但如果补过还是被丢，
@@ -1249,7 +1284,7 @@
           if (rec.plain != null) {
             churnProbe = rec.host;
             churnProbeLine = rec.peerLine;
-            noteChurn(rec.plain, idOf(rec.host));
+            noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host));
             churnProbe = null;
             churnProbeLine = null;
           }

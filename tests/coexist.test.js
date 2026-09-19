@@ -34,15 +34,37 @@ function setup(opts) {
     skipKanjiLines: true,
     coexistWithFurigana: !!(opts && opts.coexist),
   });
+  if (opts && opts.peerManages) {
+    // 模拟 jp-furigana 已经接管了这一行（它会给行挂 __fgText）
+    ctx.document.querySelectorAll("ul.lyric li")[0].__fgText = "取とり戻もどしたい　ヒーローみたいに";
+  }
   ann.pass();
   return { ctx, ann, doc: ctx.document };
 }
 
-test("含汉字的歌词行整个让给振假名插件", () => {
-  const { doc } = setup();
+test("对方正在管的含汉字歌词行，整个让给它", () => {
+  const { doc } = setup({ peerManages: true });
   const kanjiLine = doc.querySelectorAll("ul.lyric li p")[0];
-  assert.strictEqual(kanjiLine.querySelectorAll("ruby.kt-ruby").length, 0, "含汉字的行不该被我们改");
+  assert.strictEqual(kanjiLine.querySelectorAll("ruby.kt-ruby").length, 0, "对方管的行不该被我们改");
   assert.strictEqual(kanjiLine.textContent, "取とり戻もどしたい　ヒーローみたいに", "必须保持原样");
+});
+
+test("对方没管的含汉字行要照标 —— 不能因为「有汉字」就整行让开", () => {
+  // 真机事故：用户关掉 jp-furigana 之后，默认播放页整页没有注音，
+  // RNP 页只有那唯一不含汉字的一行有注音。原因是让位条件写成了
+  // `hasKanji && (!coexist || !managed)` —— 共存开关默认是关的，
+  // 于是"有汉字"就等于"整行让开"，哪怕对方根本没管这一行。
+  const { doc } = setup(); // 没有任何 jp-furigana 标记 = 对方没管
+  const kanjiLine = doc.querySelectorAll("ul.lyric li p")[0];
+  const pairs = [...kanjiLine.querySelectorAll("ruby.kt-ruby")].map((r) => [
+    r.childNodes[0].nodeValue,
+    r.querySelector(".kt-rt").textContent,
+  ]);
+  assert.ok(
+    pairs.some((p) => p[0] === "ヒーロー" && p[1] === "hero"),
+    "对方没管的行应该有注音：" + JSON.stringify(pairs)
+  );
+  assert.strictEqual(baseText(kanjiLine), "取とり戻もどしたい　ヒーローみたいに", "底字必须完整");
 });
 
 test("纯假名行归我们", () => {
@@ -533,16 +555,18 @@ test("没有译文的片段必须留下「跳过原因」，不能无声无息",
 
 test("按行让位时也要写明「对方到底管没管这一行」", () => {
   const ctx = loadCore(`<!doctype html><html><head></head><body>
-<ul class="lyric"><li class="line"><p>コーヒーを飲みながら</p></li></ul>
+<ul class="lyric"><li class="line" id="L"><p>コーヒーを飲みながら</p></li></ul>
 </body></html>`);
   forceRubyLayout(ctx, true);
+  // 让 jp-furigana「真的管着」这一行（它的标记）
+  ctx.document.getElementById("L").__fgText = "コーヒーを飲みながら";
   const logs = [];
   const ann = ctx.KTAnnotate.createAnnotator({
     document: ctx.document,
     lookup: (w) => ctx.translator.lookup(w),
     annotateAll: true,
     skipKanjiLines: true,
-    coexistWithFurigana: true, // 但这一行没有 jp-furigana 的标记 → 整行让开
+    coexistWithFurigana: false, // 共存关着 → 对方管着的行让开
     log: (m) => logs.push(String(m)),
   });
   ann.pass();
@@ -550,9 +574,38 @@ test("按行让位时也要写明「对方到底管没管这一行」", () => {
   const note = logs.find((l) => l.indexOf("未注音") === 0);
   assert.ok(note, "应该有「未注音」这一行：" + JSON.stringify(logs));
   assert.ok(note.indexOf("汉字让位") > 0, "要写明是让位：" + note);
-  assert.ok(
-    note.indexOf("peer管=false") > 0,
-    "关键是写明对方管没管这一行 —— peer管=false 就说明是我们误让位了：" + note
+  assert.ok(note.indexOf("peer管=true") > 0, "要写明是对方在管（正常让位）：" + note);
+  assert.strictEqual(
+    ctx.document.querySelectorAll("ul.lyric ruby.kt-ruby").length,
+    0,
+    "对方管着的行确实应该让开"
+  );
+});
+
+test("注音活了半秒才被重建 = 正常重绘，不该进入认输期", async () => {
+  // 真机数据把两类现象分得很清楚：
+  //   age=223ms / 435ms / 543ms  —— RNP 分几次补齐歌词行，正常重绘
+  //   age≈0~几十 ms              —— 对方无条件重建，注什么秒毁什么（真死循环）
+  // 前者配合"下一帧前补回来"根本看不见，不该认输（认输会让那一句十几秒没英文，
+  // 用户看到的就是"RNP 页的ジオラマ一直没注音"）。
+  const { doc, p, ann, logs } = fgLine({ churnBaseMs: 30 });
+
+  for (let i = 0; i < 6; i++) {
+    fgApplyWrap(doc, p, SEGMENTS);
+    // 把"注音时刻"往前挪 500ms，模拟注音活了半秒才被重建
+    const wrap = p.querySelector("span.fg-line");
+    ann.pass();
+    const host = p.querySelector("ruby.kt-ruby") ? p.querySelector("ruby.kt-ruby").parentNode : null;
+    if (host) host.__ktAt = Date.now() - 500;
+    else if (wrap) wrap.__ktAt = Date.now() - 500;
+    fgRestoreUnpatched(p);
+    await sleep(20);
+  }
+
+  assert.strictEqual(
+    logs.filter((l) => l.indexOf("churn 放弃这一行") === 0).length,
+    0,
+    "活了半秒的重建不该被当成打架：" + JSON.stringify(logs.filter((l) => l.indexOf("churn") === 0))
   );
 });
 
