@@ -355,8 +355,8 @@ test("对手无条件重建时，插件会认输停手，而不是无限对打",
   }
   assert.ok(fought >= 3, "前提：这个对手确实在和我们反复对打（changed+restored=" + fought + "）");
   assert.ok(
-    roundsWithChange <= 2,
-    "认输必须在两轮内生效，否则用户看到的就是连闪 —— 实际有 " + roundsWithChange + " 轮在改 DOM"
+    roundsWithChange <= 3,
+    "认输必须在三轮内生效，否则用户看到的就是连闪 —— 实际有 " + roundsWithChange + " 轮在改 DOM"
   );
   assert.ok(
     logs.some((l) => l.indexOf("churn 放弃这一行") === 0),
@@ -371,6 +371,35 @@ test("对手无条件重建时，插件会认输停手，而不是无限对打",
   }
   assert.strictEqual(after, 0, `认输之后不该再往这一行插注音（changed+restored=${after}）`);
   assert.strictEqual(baseText(p).trim(), "コーヒーを飲みながら", "底字不能被打乱");
+});
+
+test("歌词行刚变成当前行、被重绘两次 —— 不能被当成打架而放弃", () => {
+  // 真机事故（2.0.2 的「4s 内 2 次」误伤）：
+  //   16:36:09 已注音 文本="ジオラマに"    ← 这行刚变成当前行
+  //   16:36:10 已注音 文本="ジオラマに"    ← 被重绘掉，补一次
+  //   16:36:10 churn 放弃这一行 60s       ← 才两轮就认输，行首 60s 没注音
+  // 重绘两次之后这行就稳定了，不该放弃。
+  const { doc, p, ann, logs } = fgLine();
+
+  fgApplyWrap(doc, p, SEGMENTS);
+  ann.pass(); // 第一次注上
+  fgRestoreUnpatched(p); // 行切换 → 对方重绘
+  fgApplyWrap(doc, p, SEGMENTS);
+  ann.pass(); // 补一次
+  fgRestoreUnpatched(p); // 又重绘一次
+  fgApplyWrap(doc, p, SEGMENTS);
+  const r = ann.pass(); // 补第二次
+  assert.ok(r.changed >= 1, "第二次重绘之后还应该补上注音");
+
+  // 之后这行稳定下来：注音必须留在原位，而且不能因为前面两次重绘就进认输期
+  const idle = ann.pass();
+  assert.strictEqual(idle.changed + idle.restored, 0, "稳定之后不该再动它");
+  assert.strictEqual(
+    logs.filter((l) => l.indexOf("churn 放弃这一行") === 0).length,
+    0,
+    "两次重绘是正常换行行为，不该触发认输：" + JSON.stringify(logs.slice(-3))
+  );
+  assert.strictEqual(kataOffset(p), 0, "行首的注音必须还在");
 });
 
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
