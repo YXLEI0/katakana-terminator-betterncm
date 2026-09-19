@@ -321,7 +321,7 @@ function baseText(el) {
 }
 
 /** 造好"一行被 jp-furigana 接管的歌词" + 带 log 收集器的 annotator */
-function fgLine() {
+function fgLine(opts) {
   const ctx = loadCore(KATAKANA_LINE);
   forceRubyLayout(ctx, true);
   const doc = ctx.document;
@@ -335,12 +335,17 @@ function fgLine() {
     skipKanjiLines: true,
     coexistWithFurigana: true,
     log: (m) => logs.push(String(m)),
+    // 测试里把退避调短，不然要真等 2s
+    churnBaseMs: (opts && opts.churnBaseMs) || 2,
   });
   return { ctx, doc, p, ann, logs };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 test("对手无条件重建时，插件会认输停手，而不是无限对打", () => {
-  const { doc, p, ann, logs } = fgLine();
+  // 退避给足，保证这一轮循环里不会到期（否则测的就不是"停手"而是"重试"了）
+  const { doc, p, ann, logs } = fgLine({ churnBaseMs: 60000 });
 
   // 前几轮：对方重建 → 我们的宿主（它那个 wrap span）整个没了 → 我们重注 → 它又重建……
   fgApplyWrap(doc, p, SEGMENTS);
@@ -400,6 +405,37 @@ test("歌词行刚变成当前行、被重绘两次 —— 不能被当成打架
     "两次重绘是正常换行行为，不该触发认输：" + JSON.stringify(logs.slice(-3))
   );
   assert.strictEqual(kataOffset(p), 0, "行首的注音必须还在");
+});
+
+test("认输只是暂时的：对方不再重建之后，注音要自己回来", async () => {
+  // 真机事故：正在唱的那一两秒里，RNP 的逐字动画一直在改写当前片段所在的 wrap，
+  // 我们怎么注都会被抹掉。唱完就停了 —— 所以退避必须短，否则那一句
+  // 直到整行滚走都不会有注音（用户看到的就是"行首一直没注上"）。
+  const { doc, p, ann, logs } = fgLine({ churnBaseMs: 30 });
+
+  // 1. 先打起来，并且认输
+  fgApplyWrap(doc, p, SEGMENTS);
+  for (let i = 0; i < 5; i++) {
+    ann.pass();
+    fgRestoreUnpatched(p);
+    fgApplyWrap(doc, p, SEGMENTS);
+  }
+  assert.ok(
+    logs.some((l) => l.indexOf("churn 放弃这一行") === 0),
+    "前提：应该先判定为打架并认输：" + JSON.stringify(logs.slice(-3))
+  );
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "认输期内不该有注音");
+
+  // 2. 对方停了（逐字动画过了那一段），退避到期后应该自己补上
+  await sleep(60);
+  const r = ann.pass();
+  assert.ok(r.changed >= 1, "退避结束后应该重新注上（changed=" + r.changed + "）");
+  assert.strictEqual(kataOffset(p), 0, "补回来的注音要在行首原位");
+
+  // 3. 恢复之后如果对方又停了，注音要留在那儿
+  const idle = ann.pass();
+  assert.strictEqual(idle.changed + idle.restored, 0, "稳定之后不该再动它");
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "注音应该留着");
 });
 
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {

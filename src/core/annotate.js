@@ -174,10 +174,19 @@
     var CHURN_WINDOW_MS = 1500; // 计数窗口
     var CHURN_LIMIT = 3; // 窗口内超过这个次数才认输
     /*
-     * 首次退避 60s：真死循环一旦认输就该安静一阵，而不是"闪一下、停、又闪一下"。
-     * 退避本身按 4 倍递增（60s → 4min → 10min），对方不再重建后会自动恢复。
+     * 首次退避 2s，之后按 4 倍递增（2s → 8s → 32s → 2min → 10min 封顶）。
+     *
+     * 为什么不直接给 60s：真机上持续重写的只是**正在唱的那一两秒**
+     * （逐字动画在改写"当前字"所在的那个片段），唱完就不动了。退避给 60s 会
+     * 整段错过窗口，用户看到的就是"这一句的行首一直没注音"——实测事故：
+     *   :41:38 已注音 文本="ジオラマに"
+     *   :41:39 已注音 文本="ジオラマに"     ← 被逐字动画抹掉，补一次
+     *   :41:40 churn 放弃 60s 文本="ジオラマに"
+     *   :42:40 已注音 文本="ジオラマに"     ← 整整 60s 里那一行首都没有注音
+     * 短退避 + 递增：唱完那一瞬间的重试就能把注音稳稳补上；对方还在动的话，
+     * 下一次退避翻 4 倍，也不会退化成"一直闪"。
      */
-    var CHURN_BASE_MS = 60000; // 第一次退避
+    var CHURN_BASE_MS = typeof options.churnBaseMs === "number" ? options.churnBaseMs : 2000;
     var CHURN_MAX_MS = 600000; // 退避上限
     var CHURN_MAX_ENTRIES = 200; // 兜底：别让 Map 无限长
 
@@ -215,7 +224,13 @@
       var c = churnByText.get(text);
       if (!c || now - c.since > CHURN_WINDOW_MS) c = { count: 0, since: now, strikes: (c && c.strikes) || 0 };
       c.count++;
-      if (c.count < CHURN_LIMIT) {
+      /*
+       * 第一次遇到这个片段，给 CHURN_LIMIT 次机会（正常行切换会被重绘一两次，
+       * 不能一上来就放弃）；但已经判定过它爱打架之后，每次重试只试 1 轮 ——
+       * 退避很短（2s 起），重试会比较频繁，每次多试一轮就多闪一次。
+       */
+      var limit = c.strikes > 0 ? 1 : CHURN_LIMIT;
+      if (c.count < limit) {
         churnByText.set(text, c);
         return;
       }
