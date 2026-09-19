@@ -351,6 +351,8 @@
       state.applied = true;
       startObserver();
     }
+    // 停用时把 <style> 一并摘掉了，启用时要补回来（否则注音没有字号/不透明度）
+    updateStyles();
     schedule(0);
   }
 
@@ -365,6 +367,11 @@
       state.timerIsRaf = false;
     }
     if (state.annotator) state.annotator.restoreAll();
+    // 顺手把我们注入的 <style> 也摘掉：禁用之后页面里不该留下任何我们的东西
+    // （enable() 会再 updateStyles() 补回来）
+    if (typeof KTAnnotate !== "undefined" && KTAnnotate.removeStyles) {
+      KTAnnotate.removeStyles(document);
+    }
   }
 
   function rescan() {

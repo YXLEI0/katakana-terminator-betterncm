@@ -242,10 +242,17 @@ test("禁用后 DOM 完全还原，重新启用后又能标注", async () => {
   assert.strictEqual(rubyCount(env.document.body), 0, "禁用后不该有注音");
   assert.strictEqual(env.document.querySelectorAll(".kt-region").length, 0);
   assert.ok(!env.document.body.innerHTML.includes("kt-ruby"), "禁用后 DOM 里不该有痕迹");
+  // 我们注入的 <style> 也要收走：禁用之后页面里不该留下任何我们的东西
+  assert.strictEqual(
+    env.document.getElementById("katakana-terminator-style"),
+    null,
+    "禁用后应该把注入的样式表摘掉"
+  );
 
   env.api.set("enabled", true);
   await sleep(500);
   assert.strictEqual(env.document.body.innerHTML, annotated, "重新启用后应该回到同样的结果");
+  assert.ok(env.document.getElementById("katakana-terminator-style"), "重新启用后样式要补回来");
 });
 
 test("断网时依然能用离线词典标注", async () => {

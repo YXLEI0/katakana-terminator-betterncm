@@ -136,14 +136,13 @@ function eachEntry(block, fn) {
 function readSst(file) {
   const buf = fs.readFileSync(file);
   if (buf.length < 48) return [];
-  // footer：两个 BlockHandle（varint offset + varint size），最后 8 字节是 magic
+  // footer：两个 BlockHandle（varint offset + varint size），最后 8 字节是 magic。
+  // 只要 index block，metaindex 用不上，直接跳过。
   const st = { p: buf.length - 48 };
-  const metaOff = readVarint(buf, st);
-  const metaSize = readVarint(buf, st);
+  readVarint(buf, st); // metaindex offset
+  readVarint(buf, st); // metaindex size
   const idxOff = readVarint(buf, st);
   const idxSize = readVarint(buf, st);
-  void metaOff;
-  void metaSize;
   const found = [];
   const index = readBlock(buf, idxOff, idxSize);
   eachEntry(index, (_key, handleRaw) => {

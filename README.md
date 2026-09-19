@@ -62,21 +62,50 @@ npm run install:plugin              # 顺便复制到 C:\betterncm\plugins
 ## 和 jp-furigana 共存
 
 [jp-furigana](https://github.com/Leleawa/jp-furigana) 给汉字标振假名，本插件给片假名标英文，
-两者都想往同一行歌词里插节点，所以默认**按行分工**：
+两者都会改写同一行歌词。默认**按行分工**：
 
-- **纯假名行**（没有汉字）归本插件——jp-furigana 本来就不处理这种行；
-- **含汉字的行**整个让给 jp-furigana，本插件一个字都不碰。
+- **jp-furigana 正在管的含汉字行**整个让给它，本插件一个字都不碰；
+- **它没管的行**（没装 / 关掉了 / 还没处理到）照标 —— 含汉字也标；
+- **纯假名行**（没有汉字）本来就归本插件，jp-furigana 不处理这种行。
 
-想在一行里同时看到两种注音，就得给 jp-furigana 打补丁，让它允许外来节点存在：
+想在一行里同时看到两种注音，给 jp-furigana 打上共存补丁：
 
 ```bash
-npm run patch:furigana -- --file "C:\betterncm\plugins\jp-furigana-1.1.0.plugin"
+npm run patch:furigana            # 自动找 C:\betterncm\plugins 里的 jp-furigana*.plugin
+npm run patch:furigana -- --check # 只看状态
+npm run patch:furigana -- --revert
 ```
 
-补丁直接改 `.plugin` 包（会先存一份 `.kt-bak` 备份），改完重启网易云生效；
-然后在设置里打开「与振假名插件共用同一行」。撤销用 `--revert`，查看状态用 `--check`。
+补丁直接改 `.plugin` 包（先存一份 `.kt-bak` 备份），重建解包目录后重启网易云生效；
+然后在设置里打开「与振假名插件共用同一行」。
 
-不打补丁也能用，只是含汉字的行看不到英文注音。
+**补丁做的事**（共 5 处，都是必要的最小改动）：
+
+| # | 位置 | 作用 |
+| --- | --- | --- |
+| 1 | `isClean()` | 子节点计数忽略外来注音，否则它判定「行被外人改过」并重建 |
+| 2 | `restore()` | 拆 wrap 前把外来注音暂存到 expando，别跟着一起丢掉 |
+| 3 | observer 回调 | 忽略本插件引起的变更（**闪烁的真正来源**） |
+| 4 | `hostsText()` | 「看得见的原文」要排除外来注音的 rt，否则两边永不相等、行被无限重建 |
+| 5 | `processLine()` 末尾 | 重建完直接回调 `window.__ktRepairLine(line)`，让我们**在同一个任务里**把注音补回新 wrap |
+
+第 5 条是「不再闪」的关键：它每重建一行，我们都同步补一次，
+绘制时永远有注音 —— 靠 MutationObserver 等下一帧补，中间那一帧就是可见的一闪。
+
+> 补丁是打在**别人的包**上的，jp-furigana 一升级就会被覆盖（`.plugin` 被换掉）。
+> 症状是歌词开始抽搐、或者某一个词反复闪，重新跑一次 `npm run patch:furigana -- --force` 即可。
+> `tests/patch.test.js` 会盯住这 5 个锚点，jp-furigana 改动导致锚点失效会在 CI 里直接报出来。
+
+### 打架时的自保
+
+万一对方插件在无条件重建某一行（真死循环：我们注什么、几十毫秒内就被抹掉），
+本插件会数「同一段文字被注了又被毁」的次数，短时间内超过阈值就**主动认输**、
+把那一行让开一段时间（1s 起、每次翻倍、10 分钟封顶），而不是跟着它一直闪。
+开发模式的状态区会显示 `已避让: N 行`，轨迹里也会留下 `churn 放弃这一行 …`。
+
+**正常重绘不会触发认输**：判断依据是「注音活了多久」—— 活过 150ms 才被重建的属于
+正常重绘（对方补罗马音层、切换当前行等），补回来只要一帧、看不见，所以照补；
+只有「刚插上就被毁」才算打架。
 
 ## 翻译从哪来
 
@@ -145,6 +174,14 @@ node --use-system-ca tools/live-check.js
   不支持时改用绝对定位的 `<span>` 降级。
 - **不和自己较劲。** 扫描结束后清空 `MutationObserver` 的记录队列，
   否则自己造成的 DOM 变更会自激成死循环。
+- **补注音赶在下一帧之前。** 观测到 DOM 变更后用 `requestAnimationFrame` 立刻补，
+  而不是防抖 250ms —— 晚一帧就是肉眼可见的一闪。
+- **能被对方同步调用。** 共存补丁让 jp-furigana 重建完一行后回调
+  `window.__ktRepairLine(line)`，补注音和重建落在同一个任务里，绘制时永远有注音。
+- **靠「活了多久」分辨打架与正常重绘。** 注音被重建掉时的 `age` 小于 150ms
+  才算对方在无条件重建（此时才认输退避）；活得更久的属于正常重绘，照补不误。
+- **只读别人的状态做诊断。** `peer{dirty=… hosts=… ktOwn=… 原文一致=…}` 直接读
+  jp-furigana 的 expando，用来判断它为什么重建这一行，不改它任何东西。
 
 ## 目录结构
 
@@ -156,7 +193,7 @@ src/
   core/dict.js        离线词典（自动生成，勿手改）
   core/translate.js   缓存 / 词典 / 在线请求的调度
   core/annotate.js    DOM 注音注入与还原
-tests/                jsdom 单元测试
+tests/                jsdom 单元测试（含共存补丁的自检）
 tools/
   build.js            打包成 .plugin（zip）
   build-dict.js       生成离线词典
@@ -167,6 +204,25 @@ tools/
   patch-jp-furigana-plugin.js  把补丁打进 .plugin 包（持久化，备份 .kt-bak）
   read-trace.js       从网易云的 Local Storage 里读插件运行轨迹
 ```
+
+### 读运行轨迹
+
+插件会把关键信息和异常写进 `localStorage`（上限 250 行）。它落在网易云的 leveldb 里，
+值是 Snappy 压缩的、还跨 record 分片，所以别手工去捞：
+
+```bash
+node tools/read-trace.js            # 读轨迹（自动挑最新的那一份）
+node tools/read-trace.js --raw      # 原样打印值
+```
+
+轨迹里排查问题主要看三类行：
+
+| 行 | 含义 |
+| --- | --- |
+| `[pass] regions=… changed=… restored=… skipped=… unstable=…` | 每轮扫描的结果。`changed/restored` 长期不为 0 就是没收敛 |
+| `[annotate] churn 放弃这一行 … age=… peer{…}` | 认输退避。`age` 是注音活了多久，`peer{…}` 是对端（jp-furigana）当时的状态 |
+| `[annotate] 未注音 无译文/汉字让位/认输期 …` | **某处没注上音**的原因，每种跳过都会留痕 |
+
 
 ## 开发
 
@@ -202,9 +258,11 @@ npm run build:dict
 
 - **桌面歌词不生效。** 那是原生窗口，不是网页，插件技术上够不到。
 - 单片假名词不注（「ア」这种），除非它正好在词典里。
-- 只处理假名，汉字振假名是另一个插件（jp-furigana）的活。含汉字的**歌词行**
-  默认整个让给 jp-furigana（详见上面「和 jp-furigana 共存」）；
+- 只处理假名，汉字振假名是另一个插件（jp-furigana）的活。**jp-furigana 正在管的
+  含汉字歌词行**默认整个让给它（详见上面「和 jp-furigana 共存」）；它没管的行照标，
   播放栏的歌名/歌手不归它管，含汉字也照标。
+- **共存补丁会被 jp-furigana 的更新覆盖。** 补丁打在它的 `.plugin` 包里，
+  包一换就没了 —— 症状是歌词抽搐或某个词反复闪，重跑 `npm run patch:furigana -- --force` 即可。
 - 在线翻译依赖 Google 的**非公开**接口，可能失效或被限流；失效时自动退回离线词典。
 
 ## 许可

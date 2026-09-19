@@ -1,5 +1,40 @@
 # 更新记录
 
+## 2.1.0（定稿）
+
+这一版**不改行为**（2.0.14 已经跑通），只做清理与归档 —— 把这一轮迭代里攒下的
+死代码、遗留文件、说不清的注释收干净，并把结论写进文档。
+
+### 删掉的代码
+
+| 位置 | 内容 | 为什么 |
+| --- | --- | --- |
+| `annotate.js` | `decidedByHost` 里的 `plain` / `annotated` / `reAnnotated` | 那是「文字没变就只补一次」防抖用的。防抖已统一交给 churn 计数器（按 age 判定），这三个字段没有任何地方再读 |
+| `annotate.js` | `churnProbe` / `churnProbeLine` 两个可变全局 | 改成 `noteChurn()` 的参数：少两个跨函数状态，且日志里的 `age` 不再靠"再从宿主上算一遍" |
+| `annotate.js` | 导出里的 `styles` / `RE_CREDIT` | 模块自用，外部没人用 |
+| `off.txt` | — | 遗留在仓库根目录的调试输出 |
+| `tools/cdp-capture.js` | — | 早前 PowerShell 往返把它写成了 GBK 乱码；功能已被 `tools/read-trace.js` 取代 |
+
+### 补上的小缺口
+
+`removeStyles()` 以前是死代码（导出了但没人调）。现在**禁用插件时会把注入的
+`<style>` 一并摘掉**，`enable()` 里再 `updateStyles()` 补回来 —— 禁用之后页面里
+不留任何我们的东西。集成测试跟着断言了这一点。
+
+### 文档
+
+README 重写了「和 jp-furigana 共存」：五条补丁各自解决什么、为什么会闪、
+怎么重新打补丁，以及「打架时的自保」的判定依据（`age`）。新增「读运行轨迹」一节，
+说明 `tools/read-trace.js` 的用法和三类关键轨迹行。已知限制里补上
+「共存补丁会被 jp-furigana 更新覆盖」。
+
+### 状态
+
+- `npm run check` 通过（0 警告）
+- `npm run test:serial` **90 个用例**全过（matcher 14 / annotate 22 / coexist 21 / patch 5 / translate 14 / integration 14）
+- 共存补丁 5 处锚点由 `tests/patch.test.js` 固定，jp-furigana 升级导致锚点失效会在 CI 直接报出来
+- 真机验证：RNP 歌词页与默认播放页都不再闪，含汉字行照标
+
 ## 2.0.14
 
 **根治那一次可见的闪：让补注音和对方的重建发生在同一个任务里。**

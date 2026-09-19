@@ -245,8 +245,16 @@
       return Date.now() - host.__ktAt;
     }
 
-    /** 记一次"文本没变但注音失效"；到达阈值就进入退避 */
-    function noteChurn(text, where, ageMs) {
+    /**
+     * 记一次"文本没变但注音失效"；到达阈值就进入退避。
+     *
+     * @param text    被毁掉的那段文字（认输/退避都以它为键）
+     * @param where   宿主的简短身份，写进轨迹用
+     * @param ageMs   注音活了多久才被毁（undefined 表示不清楚，按"打架"算）
+     * @param peerLine 注音时抓下来的行元素（宿主脱链后仍能读对端状态）
+     * @param peerEl  兜底元素，peerLine 没有时顺着它往上找行
+     */
+    function noteChurn(text, where, ageMs, peerLine, peerEl) {
       if (!text) return;
       /*
        * 活够久才被重建 = 正常重绘，不是打架：不计数。
@@ -259,8 +267,7 @@
       c.count++;
       /*
        * 第一次遇到这个片段，给 CHURN_LIMIT 次机会（正常行切换会被重绘一两次，
-       * 不能一上来就放弃）；但已经判定过它爱打架之后，每次重试只试 1 轮 ——
-       * 退避很短，重试会比较频繁，每次多试一轮就多闪一次。
+       * 不能一上来就放弃）；已经判过它爱打架之后，每次重试只试 1 轮。
        */
       var limit = c.strikes > 0 ? 1 : CHURN_LIMIT;
       if (c.count < limit) {
@@ -270,19 +277,18 @@
       }
       c.strikes++;
       /*
-       * 退避按 2 倍递增，而不是"第一次之后直接顶到 10 分钟"。
-       *
-       * 后者是 2.0.6 的策略，被真机数据否掉了：对端状态健康（原文一致=true）、
-       * 两次 churn 隔了 3 秒 —— 那是正常重绘，却让那一句十分钟没有英文。
-       * 翻倍递增下，正常重绘重试一两次就稳住了；真死循环会很快退到 10 分钟。
+       * 退避按 2 倍递增（1s → 2s → … → 10min 封顶）。
+       * 不要改成"第二次起直接顶到 10 分钟"：真机数据否过它 ——
+       * 对端状态健康、两次 churn 隔了 3 秒，那只是正常重绘，
+       * 却让那一句十分钟没有英文。翻倍递增下正常重绘重试一两次就稳了，
+       * 真死循环才会很快退到上限。
        */
       var wait = Math.min(CHURN_BASE_MS * Math.pow(2, c.strikes - 1), CHURN_MAX_MS);
       churnUntil.set(text, now + wait);
       /*
-       * 注意：这里**不能**把记录删掉。strikes 必须跨退避留着，否则下次
-       * 重新计数时它又从 0 开始 —— 于是"已经判过它爱打架"永远不成立、
-       * 退避也永远停在第 1 档（2.0.5 的实际 bug：每 2s 就再闪一下）。
-       * 只把窗口计数清零，保留 strikes。
+       * 不能把记录删掉：strikes 必须跨退避留着，否则下次重新计数时它又从 0 开始，
+       * "已经判过它爱打架"永远不成立、退避也永远停在第 1 档
+       * （2.0.5 的实际 bug：每 2s 就再闪一下）。只把窗口计数清零。
        */
       churnByText.set(text, { count: 0, since: now, strikes: c.strikes, last: now });
       if (options.log) {
@@ -296,16 +302,13 @@
             "）文本=" +
             JSON.stringify(String(text).slice(0, 40)) +
             " age=" +
-            (churnProbe && churnProbe.__ktAt ? Date.now() - churnProbe.__ktAt + "ms" : "?") +            " " +
-            describePeer(churnProbe)
+            (typeof ageMs === "number" ? Math.round(ageMs) + "ms" : "?") +
+            " " +
+            describePeer(peerLine, peerEl)
         );
       }
       churnPrune();
     }
-
-    // noteChurn 调用时传给 describePeer 的探针（宿主脱链前抓下来的行元素）
-    var churnProbe = null;
-    var churnProbeLine = null;
 
     /**
      * 诊断用：把 jp-furigana **自己**的状态读出来，看它为什么会重建这一行。
@@ -330,12 +333,11 @@
       return null;
     }
 
-    function describePeer(el) {
+    function describePeer(lineEl, fallbackEl) {
       try {
-        // 优先用注音时存下来的行元素；调用时传进来的 host 往往已经脱链了
-        var line = (churnProbeLine && churnProbeLine.__fgText != null)
-          ? churnProbeLine
-          : enclosingPeerLine(el);
+        // 优先用注音时存下来的行元素；兜底元素往往已经脱链，找不到行
+        var line =
+          lineEl && lineEl.__fgText != null ? lineEl : enclosingPeerLine(fallbackEl);
         if (!line || line.__fgText == null) return "peer=无标记";
         var hosts = line.__fgHosts || [];
         var noWrap = 0;
@@ -622,18 +624,15 @@
         // 那时 host 已经脱链，parentElement 全是 null，诊断只能输出"无标记"。
         peerLine: enclosingPeerLine(host),
       });
-      // 记下"这个 host 的这段内容已经注过音了"，两种可见形态都记，
-      // 因为 React 丢掉我们插的节点前后，可见底字不一样。
-      // reAnnotated 表示这次是「补回来的第二次」，用来止住无限来回。
-      var prevDecision = decidedByHost.get(host);
-      decidedByHost.set(host, {
-        plain: text,
-        annotated: visibleText(host),
-        reAnnotated: !!(prevDecision && prevDecision.plain === text),
-        // 注音时刻。prior 那条路（元素还在、注音没了）拿不到记录，
-        // 只能靠这个算"注音活了多久"，否则 age 是 undefined、闸门失效。
-        at: Date.now(),
-      });
+      // 记下"这个 host 我们已经注过音了"，给下面 prior 那段判断用。
+      /*
+       * 只记一个注音时刻。
+       *
+       * 以前这里还存 plain / annotated / reAnnotated，是给"文字没变就只补一次"
+       * 那道防抖用的。现在防抖已经统一交给 churn 计数器（按 age 区分真死循环
+       * 与正常重绘），那三个字段没有任何地方读了 —— 留着只会让人以为还有第二道闸。
+       */
+      decidedByHost.set(host, { at: Date.now() });
 
       if (options.log && records.size <= 40) {
         // 记下区域和宿主的身份。真机排障时最关键的就是这个 host：
@@ -900,11 +899,7 @@
         // 宿主整个被摘掉 = 我们刚注的那段文字连同容器一起被对方丢弃了。
         // 真机轨迹里 restored 全部来自这里（一条"失效[...]"都没有），
         // 说明闪烁的形态就是"宿主被反复删掉重建"，而不是判定逻辑出错。
-        churnProbe = rec.host;
-        churnProbeLine = rec.peerLine;
-        noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host));
-        churnProbe = null;
-        churnProbeLine = null;
+        noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host), rec.peerLine, rec.host);
         records.delete(dead[i]);
       }
       return dead.length;
@@ -1258,7 +1253,9 @@
           noteChurn(
             visibleNow,
             idOf(hostEl),
-            typeof prior.at === "number" ? Date.now() - prior.at : ageOf(hostEl)
+            typeof prior.at === "number" ? Date.now() - prior.at : ageOf(hostEl),
+            enclosingPeerLine(hostEl),
+            hostEl
           );
         }
 
@@ -1277,11 +1274,7 @@
           if (!stale && intact) continue; // 注音在位、底字没变 —— 一个字节都不动
           // 要动它了。先记一次 churn（age 够大就不算打架，见 noteChurn）。
           if (rec.plain != null) {
-            churnProbe = rec.host;
-            churnProbeLine = rec.peerLine;
-            noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host));
-            churnProbe = null;
-            churnProbeLine = null;
+            noteChurn(rec.plain, idOf(rec.host), ageOf(rec.host), rec.peerLine, rec.host);
           }
           if (stale && intact) {
             // 底字真的变了：还原（摘掉注音、写回原文）再重注
@@ -1465,10 +1458,8 @@
 
   return {
     createAnnotator: createAnnotator,
-    styles: styles,
     applyStyles: applyStyles,
     removeStyles: removeStyles,
     hasRubyLayout: hasRubyLayout,
-    RE_CREDIT: RE_CREDIT,
   };
 });
