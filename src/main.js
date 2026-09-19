@@ -743,6 +743,22 @@
       return;
     }
 
+    /*
+     * 钩子：装了共存补丁的 jp-furigana 重建完一行后会**直接叫我们**，
+     * 让我们在同一个任务里把注音补回新 wrap —— 等下一帧就是肉眼可见的一闪。
+     * 真机轨迹：`changed=1 restored=1` 每秒五次、永不停止，就是缺这个同步补。
+     */
+    try {
+      window.__ktRepairLine = function (lineEl) {
+        if (!config.enabled || !state.annotator || !state.annotator.repairLine) return false;
+        // 顺手把观测队列清掉：这一轮的变更全是我们自己造成的，不必再排一次 pass
+        if (state.observer) state.observer.takeRecords();
+        return state.annotator.repairLine(lineEl);
+      };
+    } catch (e) {
+      /* 挂不上就算了，还有 MutationObserver 那条路 */
+    }
+
     if (config.enabled) enable();
     else state.annotator.restoreAll();
 

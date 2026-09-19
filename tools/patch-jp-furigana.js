@@ -191,6 +191,43 @@ const PATCHES = [
       "\t\t\t\tout += plainText(n);\n" +
       "\t\t\t}",
   },
+  {
+    /*
+     * 第五条：重建完这一行之后，叫片假名终结者一声。
+     *
+     * 为什么需要：真机轨迹里 `changed=1 restored=1` 每秒重复五次、永不停止 ——
+     * 对方每 ~200ms 重建一次这一行（新 wrap），我们就补一次注音。
+     * 而我们是被 MutationObserver 叫醒的，补的动作要等到**下一帧**才落地，
+     * 中间那一帧画出来就是没有注音的样子 —— 肉眼就是"一直在闪"。
+     *
+     * 同步补就没有这个空窗：我们被它直接调用，在**同一个任务**里把注音插回新 wrap，
+     * 之后才轮到绘制。而且它自己的 observer 已经会忽略我们的变更（第三条），
+     * 所以插完不会反过来再触发它重建，不会自激。
+     *
+     * 钩子由片假名终结者注册（window.__ktRepairLine）；它不在的话这一句就是空转，
+     * 对没装/没开我们的用户没有任何影响。
+     */
+    name: "processLine: 重建完这一行后通知片假名终结者同步补注音",
+    from:
+      "\t\tline.__fgText = text;\n" +
+      "\t\tline.__fgHosts = hosts;\n" +
+      "\t\tline.__fgMirrors = mirrors;\n" +
+      "\t\treturn true;",
+    to:
+      "\t\tline.__fgText = text;\n" +
+      "\t\tline.__fgHosts = hosts;\n" +
+      "\t\tline.__fgMirrors = mirrors;\n" +
+      "\t\t// " +
+      MARK +
+      " 我们刚刚把这一行整个换新了，别人的注音跟着没了。\n" +
+      "\t\t// 这时候直接叫它同步补回来，别等下一帧 —— 等一帧就是肉眼可见的一闪。\n" +
+      "\t\t// 它自己的 observer 会忽略我们这边的变更，所以不会自激。\n" +
+      "\t\ttry {\n" +
+      "\t\t\tif (typeof window !== 'undefined' && typeof window.__ktRepairLine === 'function')\n" +
+      "\t\t\t\twindow.__ktRepairLine(line);\n" +
+      "\t\t} catch (e) { /* ignore */ }\n" +
+      "\t\treturn true;",
+  },
 ];
 
 // ---------------------------------------------------------------- 纯函数

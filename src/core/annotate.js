@@ -1358,6 +1358,32 @@
       return churnUntil.size;
     }
 
+    /*
+     * 同步补注音：给"刚刚把这一行整个换新"的对方插件用的钩子。
+     *
+     * 为什么必须是同步的：真机轨迹里 `changed=1 restored=1` 每秒重复五次、
+     * 永不停止 —— 对方每 ~200ms 重建一次这一行，我们靠 MutationObserver 被叫醒，
+     * 补的动作要等到下一帧才落地，中间那一帧就是"没有注音"的样子，
+     * 肉眼就是一直在闪。被对方**直接调用**就没有这个空窗。
+     *
+     * 重入保护：我们自己的 pass 也会改 DOM，虽然对方的 observer 已经忽略我们的
+     * 变更（补丁第三条），但这是同步调用链上的一环，递归没有任何好处，挡掉。
+     */
+    var repairing = false;
+    function repairLine(lineEl) {
+      if (repairing) return false;
+      if (!lineEl || lineEl.nodeType !== 1 || !lineEl.isConnected) return false;
+      repairing = true;
+      try {
+        pass([lineEl]);
+        return true;
+      } catch (e) {
+        return false;
+      } finally {
+        repairing = false;
+      }
+    }
+
     return {
       pass: pass,
       restoreAll: restoreAll,
@@ -1365,6 +1391,7 @@
       customRegions: customRegions,
       injectedCount: injectedCount,
       churnedCount: churnedCount,
+      repairLine: repairLine,
       cleanup: cleanup,
     };
   }

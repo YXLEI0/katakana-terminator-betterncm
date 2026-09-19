@@ -285,6 +285,37 @@ test("对方把注音抹掉后，必须在下一帧之前补回来（不能等 2
   assert.strictEqual(baseText(line), "ギターとピアノのセッション", "底字必须保持原文");
 });
 
+test("对方重建完一行直接叫我们时，注音要在同一次调用里补好（不能等下一帧）", async () => {
+  // 真机轨迹：对方每 ~200ms 重建一次当前行，我们靠 MutationObserver 被叫醒，
+  // 补的动作要等下一帧才落地 —— 中间那一帧就是"没有注音"，肉眼就是一直在闪。
+  // 共存补丁让 jp-furigana 重建完直接调 window.__ktRepairLine(line)，
+  // 于是补注音和重建发生在同一个任务里，绘制时永远有注音。
+  const env = bootPlugin(NCM_HTML);
+  await env.runLoad();
+  await sleep(600);
+
+  assert.strictEqual(typeof env.window.__ktRepairLine, "function", "应该注册了同步补注音的钩子");
+
+  const li = env.document.querySelectorAll("ul.lyric li")[1];
+  const p = li.querySelector("p");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "前提：先注上音");
+
+  // 模拟对方重建这一行：整行内容换新（我们的注音随之消失）
+  const fresh = env.document.createTextNode("ギターとピアノのセッション");
+  while (p.firstChild) p.removeChild(p.firstChild);
+  p.appendChild(fresh);
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 0, "重建后注音应已消失");
+
+  // 对方重建完直接叫我们 —— 调用返回时注音就必须已经补好
+  const ok = env.window.__ktRepairLine(li);
+  assert.strictEqual(ok, true, "钩子应该返回 true（真的补了）");
+  assert.ok(
+    p.querySelectorAll("ruby.kt-ruby").length >= 1,
+    "钩子返回时注音必须已经就位（否则那一帧就是没有注音的样子）"
+  );
+  assert.strictEqual(baseText(p), "ギターとピアノのセッション", "底字必须保持原文");
+});
+
 test("设置面板能构建出来，控件反映当前配置，链接交给系统浏览器", () => {
   const env = bootPlugin(NCM_HTML);
   const root = env.listeners.config[0]();

@@ -50,42 +50,51 @@ const FIXTURE = [
   "\t\t\t\tif (r.type !== 'characterData' && r.type !== 'childList') continue;",
   "\t\t\t\trelevant = true;",
   "\t\t\t}",
-  "\t});",  "})();",
+  "\t});",
+  "\tfunction processLine(line) {",
+  "\t\tline.__fgText = text;",
+  "\t\tline.__fgHosts = hosts;",
+  "\t\tline.__fgMirrors = mirrors;",
+  "\t\treturn true;",
+  "\t}",
+  "})();",
   "",
 ].join("\n");
 
-/** 四处锚点 —— 少一处就说明补丁会打不全 */
+/** 五处锚点 —— 少一处就说明补丁会打不全 */
 const ANCHORS = [
   "if (h.childNodes.length !== 1) return false;",
   "wrap.remove();",
   "if (r.type !== 'characterData' && r.type !== 'childList') continue;",
   "for (const n of h.__fgOrig || []) out += n.textContent;",
+  "line.__fgMirrors = mirrors;",
 ];
 
-test("四处锚点在样本里都能找到", () => {
+test("五处锚点在样本里都能找到", () => {
   for (const a of ANCHORS) {
     assert.ok(FIXTURE.indexOf(a) >= 0, "样本缺少锚点（补丁会打不上）：" + a);
   }
 });
 
-test("applyPatch 四处全部应用，且结果语法正确、锚点不再残留", () => {
+test("五处补丁全部应用，且结果语法正确、锚点不再残留", () => {
   const r = applyPatch(FIXTURE);
   assert.strictEqual(r.error, undefined, "不该有锚点缺失：" + JSON.stringify(r.error));
-  assert.strictEqual(r.applied.length, 4, "应该应用 4 处：" + JSON.stringify(r.applied));
+  assert.strictEqual(r.applied.length, 5, "应该应用 5 处：" + JSON.stringify(r.applied));
   assert.ok(isPatched(r.src));
   // 打完补丁的代码必须是合法 JS —— 打坏别人的插件是最坏的结果
   assert.doesNotThrow(() => new vm.Script(r.src), "补丁后的代码语法必须正确");
   // 被整段替换掉的两处原文不该再出现
-  // （另两处是"原地加一句"，原文本来就要留着，见下面的断言）
+  // （另三处是"原地加一句"，原文本来就要留着，见下面的断言）
   for (const gone of [
     "if (h.childNodes.length !== 1) return false;",
     "for (const n of h.__fgOrig || []) out += n.textContent;",
   ]) {
     assert.strictEqual(r.src.indexOf(gone), -1, "打完补丁后不该还留着原文：" + gone);
   }
-  // 另外两处是原地插入：原文要留着，同时多出我们的那几行
+  // 原地插入：原文要留着，同时多出我们的那几行
   assert.ok(r.src.indexOf("if (__ktRecordIsOurs(r)) continue;") > 0, "observer 该忽略我们的变更");
   assert.ok(r.src.indexOf("host.__ktForeign = __ktNodes;") > 0, "restore 该暂存外来注音");
+  assert.ok(r.src.indexOf("window.__ktRepairLine(line);") > 0, "重建完该同步叫我们补注音");
   // 我们的实现细节要在里面
   assert.ok(r.src.indexOf("__ktIsForeign") > 0, "应该注入 helper");
   assert.ok(r.src.indexOf("__ktRecordIsOurs") > 0, "应该注入 helper");
