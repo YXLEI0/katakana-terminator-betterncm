@@ -279,10 +279,16 @@
       for (var k = startIndex; k < pieces.length; k++) {
         var piece = pieces[k];
         var childNode = piece.ruby || doc.createTextNode(piece.text);
+        // 给"我们自己造出来的"节点打标记：别的插件（jp-furigana）的
+        // MutationObserver 靠它区分"这是片假名终结者插的"从而不把行标脏。
+        // 见 tools/patch-jp-furigana.js 的 __ktRecordIsOurs。
+        if (childNode.nodeType === 3) childNode.__ktOwned = true;
         tail.appendChild(childNode);
         inserted.push(childNode);
       }
       host.insertBefore(tail, leadIsRuby ? null : node.nextSibling);
+      // 原文本节点（保留下来那条）的值也被我们改写过，同样算我们的
+      if (!leadIsRuby) node.__ktOwned = true;
 
       // 记录：原节点是否还留在 host 里（leadIsRuby 时它已被移除）、
       // 注音节点清单，以及它原来插在哪个位置（host 的子节点下标）。
@@ -327,6 +333,24 @@
             " 文本=" +
             JSON.stringify(text.slice(0, 30))
         );
+      }
+
+      /*
+       * 消费 jp-furigana 的「暂存」交接（见 tools/patch-jp-furigana.js）。
+       *
+       * 它的 restore() 会把我们插在它 wrap 里的注音节点摘下来放到 host.__ktForeign，
+       * 等我们挂回原位。这里必须**取走并清空**：
+       *   - 取走：立刻把注音补回去，缩短可见的空窗（闪烁感主要来自这里）；
+       *   - 清空：否则它每次还原都再挂一次同一个节点，会越积越多。
+       */
+      var foreign = host.__ktForeign;
+      if (foreign && foreign.length) {
+        host.__ktForeign = null;
+        for (var fi = 0; fi < foreign.length; fi++) {
+          var fnode = foreign[fi];
+          if (!fnode || fnode.parentNode === host) continue; // 已经在原位
+          host.insertBefore(fnode, node.nextSibling);
+        }
       }
 
       if (!hasRubyLayout(doc) && host.setAttribute && !host.hasAttribute("data-kt-fallback")) {

@@ -65,6 +65,34 @@ const HELPER = `
 		for (const c of el.childNodes) if (!__ktIsForeign(c)) n++;
 		return n;
 	}
+
+	// 这条 MutationRecord 是不是"片假名终结者插注音"引起的？
+	// 是的话就不该因此把歌词行标脏 —— 否则每次它插节点我们都会重建整行，
+	// 两边来回就是闪烁。
+	function __ktRecordIsOurs(r) {
+		try {
+			// 插入/删除的节点里有我们的注音
+			if (r.addedNodes && r.addedNodes.length) {
+				let allOurs = true;
+				for (const n of r.addedNodes) {
+					if (!__ktIsForeign(n) && !(n.nodeType === 3 && n.__ktOwned)) { allOurs = false; break; }
+				}
+				if (allOurs) return true;
+			}
+			if (r.removedNodes && r.removedNodes.length) {
+				let allOurs = true;
+				for (const n of r.removedNodes) {
+					if (!__ktIsForeign(n) && !(n.nodeType === 3 && n.__ktOwned)) { allOurs = false; break; }
+				}
+				if (allOurs) return true;
+			}
+			// characterData：改的是我们留下的那段文本节点
+			if (r.type === 'characterData' && r.target && r.target.__ktOwned) return true;
+			// 变更目标本身就在我们的注音节点内部
+			if (r.target && r.target.nodeType === 1 && __ktIsForeign(r.target)) return true;
+		} catch (e) { /* ignore */ }
+		return false;
+	}
 `;
 
 const PATCHES = [
@@ -95,6 +123,34 @@ const PATCHES = [
       "\t\t\t\tif (__ktNodes.length) host.__ktForeign = __ktNodes;\n" +
       "\t\t\t} catch (e) { /* ignore */ }\n" +
       "\t\t\twrap.remove();",
+  },
+  {
+    /*
+     * 第三条，也是最关键的：observer 层面忽略我们的变更。
+     *
+     * 它的回调对任何 childList/characterData 变更都会把最近的歌词行标脏：
+     *     for (; el; el = el.parentElement)
+     *         if (el.__fgText != null) { el.__fgDirty = true; ... }
+     * 我们插 <ruby> 恰好就是一次 childList 变更 → 该行被判脏 → processLine →
+     * restoreLine 先把 wrap 摘掉（我们的注音随之消失）→ 重建 → 我们再插……
+     * 这才是"闪烁"的真正来源：不是判定逻辑，而是**变更通知**把行标脏了。
+     */
+    name: "observer: 忽略片假名终结者引起的变更（闪烁的真正来源）",
+    from:
+      "\t\t\tfor (const r of records) {\n" +
+      "\t\t\t\t// 只关心文字和结构变化\n" +
+      "\t\t\t\tif (r.type !== 'characterData' && r.type !== 'childList') continue;\n" +
+      "\t\t\t\trelevant = true;",
+    to:
+      "\t\t\tfor (const r of records) {\n" +
+      "\t\t\t\t// 只关心文字和结构变化\n" +
+      "\t\t\t\tif (r.type !== 'characterData' && r.type !== 'childList') continue;\n" +
+      "\t\t\t\t// " +
+      MARK +
+      " 片假名终结者插的注音引起的变更不算「行被外人改过」，\n" +
+      "\t\t\t\t// 否则它每插一个 <ruby> 我们就把整行标脏、重建一次 → 来回闪。\n" +
+      "\t\t\t\tif (__ktRecordIsOurs(r)) continue;\n" +
+      "\t\t\t\trelevant = true;",
   },
 ];
 

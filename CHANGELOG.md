@@ -1,5 +1,42 @@
 # 更新记录
 
+## 1.2.3
+
+继续修闪烁。这次找到了**真正的来源**：不是判定逻辑，而是**变更通知**。
+
+jp-furigana 的 MutationObserver 回调里对任何 `childList`/`characterData` 变更
+都会把最近的歌词行标脏：
+
+```js
+for (const r of records) {
+  if (r.type !== 'characterData' && r.type !== 'childList') continue;
+  for (let el = r.target; el; el = el.parentElement)
+    if (el.__fgText != null) { el.__fgDirty = true; ... }   // ← 无条件标脏
+```
+
+我们插 `<ruby>` 恰好就是一次 `childList` 变更 → 该行被判脏 → `processLine` →
+`restoreLine` 先把 wrap 摘掉（我们的注音随之消失）→ 重建 → 我们再插……
+
+前两处补丁只影响「判定是否干净」，管不到「什么时候被标脏」，所以照样每轮重建。
+
+补丁新增第三条（关键）：在 observer 回调最前面跳过我们引起的变更
+（`__ktRecordIsOurs`）。配套地，插件会给**自己造出来的节点**打上 `__ktOwned`
+标记（新建的文本分段 + 改写过的原文本节点），供它识别。
+
+判断逻辑用 9 个用例验证过：
+
+| 变更 | 视为我们的 |
+| --- | --- |
+| 插入/删除我们的 ruby | ✅ |
+| 插入我们标记过的文本节点 | ✅ |
+| 改写我们改过的原文本节点 | ✅ |
+| 插入普通文本节点 | ❌ |
+| 插入别人的 ruby | ❌ |
+| 混合插入（我们的 + 普通的） | ❌ |
+
+另外插件侧消费 `host.__ktForeign`：取走并**清空**它还原时摘下的注音节点，
+立刻挂回原位（缩短可见空窗），同时避免节点越积越多。
+
 ## 1.2.2
 
 修「歌词行消失」——**这是我 1.2.0 补丁里的 bug，我造成的。**
