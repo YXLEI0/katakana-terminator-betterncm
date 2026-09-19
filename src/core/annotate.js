@@ -174,20 +174,27 @@
     var CHURN_WINDOW_MS = 1500; // 计数窗口
     var CHURN_LIMIT = 3; // 窗口内超过这个次数才认输
     /*
-     * 首次退避 2s，之后按 4 倍递增（2s → 8s → 32s → 2min → 10min 封顶）。
+     * 退避：1s 起，每次翻倍（1s → 2s → 4s → … → 10min 封顶）。
      *
-     * 为什么不直接给 60s：真机上持续重写的只是**正在唱的那一两秒**
-     * （逐字动画在改写"当前字"所在的那个片段），唱完就不动了。退避给 60s 会
-     * 整段错过窗口，用户看到的就是"这一句的行首一直没注音"——实测事故：
-     *   :41:38 已注音 文本="ジオラマに"
-     *   :41:39 已注音 文本="ジオラマに"     ← 被逐字动画抹掉，补一次
-     *   :41:40 churn 放弃 60s 文本="ジオラマに"
-     *   :42:40 已注音 文本="ジオラマに"     ← 整整 60s 里那一行首都没有注音
-     * 短退避 + 递增：唱完那一瞬间的重试就能把注音稳稳补上；对方还在动的话，
-     * 下一次退避翻 4 倍，也不会退化成"一直闪"。
+     * 这里的教训是拿真机轨迹换来的，别把 "短退避" 改回 "一次就退 10 分钟"：
+     *   17:04:09 churn 2s   ... peer{dirty=false hosts=1 无wrap=0 ktOwn=1 原文一致=true}
+     *   17:04:12 churn 600s ... peer{dirty=false hosts=1 无wrap=0 ktOwn=1 原文一致=true}
+     * 对端状态完全健康（isClean 必然为真），两次之间隔了 3 秒 —— 那是**正常的重绘**
+     * （行切换/逐字动画），不是死循环；可它被当成死循环直接退了 600s，
+     * 于是那一句整整十分钟没有英文（用户原话："ジオラマ的英文消失了"）。
+     *
+     * 死循环的特征是"短时间内连续十几二十轮"（1.2.3 之前的实测：每秒 4 轮、
+     * 一分钟十几条 churn）。所以正确策略是**短退避、尽快重试**：
+     * 正常重绘的重试一次就稳住了；真死循环则靠翻倍在一分钟内退到 10 分钟。
      */
-    var CHURN_BASE_MS = typeof options.churnBaseMs === "number" ? options.churnBaseMs : 2000;
+    var CHURN_BASE_MS = typeof options.churnBaseMs === "number" ? options.churnBaseMs : 1000;
     var CHURN_MAX_MS = 600000; // 退避上限
+    /*
+     * 原谅期：这么久没有再打架，就把 strikes 清零。
+     * 否则一段文字一旦被打过一次，之后每次重试都只给 1 轮机会、退避起点也更高，
+     * 于是一首歌里只会越来越容易被判成"打架"。
+     */
+    var CHURN_FORGIVE_MS = 10000;
     var CHURN_MAX_ENTRIES = 200; // 兜底：别让 Map 无限长
 
     function churnPrune() {
@@ -212,8 +219,12 @@
       if (!text) return false;
       var until = churnUntil.get(text);
       if (until == null) return false;
-      if (Date.now() < until) return true;
+      var now = Date.now();
+      if (now < until) return true;
       churnUntil.delete(text); // 退避结束，再试一次
+      // 安静够久就把 strikes 也忘掉：下次是新的"事故"，该从头给足机会
+      var c = churnByText.get(text);
+      if (c && now - (c.last || 0) > CHURN_FORGIVE_MS) churnByText.delete(text);
       return false;
     }
 
@@ -227,24 +238,23 @@
       /*
        * 第一次遇到这个片段，给 CHURN_LIMIT 次机会（正常行切换会被重绘一两次，
        * 不能一上来就放弃）；但已经判定过它爱打架之后，每次重试只试 1 轮 ——
-       * 退避很短（2s 起），重试会比较频繁，每次多试一轮就多闪一次。
+       * 退避很短，重试会比较频繁，每次多试一轮就多闪一次。
        */
       var limit = c.strikes > 0 ? 1 : CHURN_LIMIT;
       if (c.count < limit) {
+        c.last = now;
         churnByText.set(text, c);
         return;
       }
       c.strikes++;
       /*
-       * 退避策略：第一次认输只退 2s（给对方"其实只是正在唱那一两秒"的机会，
-       * 唱完补上就稳了）；**第二次起直接顶到上限 10 分钟**。
+       * 退避按 2 倍递增，而不是"第一次之后直接顶到 10 分钟"。
        *
-       * 为什么不继续按 4 倍递增（2s→8s→32s→2min→10min）：那样每次重试都会让
-       * 那个片段再闪一下，用户看到的是"隔几秒闪一下、隔几秒闪一下"——
-       * 真机反馈正是"只有ジオラマ在闪，其他正常"。一次机会足够区分两种情况：
-       * 真能稳的，2s 后就稳了；稳不了的，再试也没用，索性长时间让开。
+       * 后者是 2.0.6 的策略，被真机数据否掉了：对端状态健康（原文一致=true）、
+       * 两次 churn 隔了 3 秒 —— 那是正常重绘，却让那一句十分钟没有英文。
+       * 翻倍递增下，正常重绘重试一两次就稳住了；真死循环会很快退到 10 分钟。
        */
-      var wait = c.strikes === 1 ? CHURN_BASE_MS : CHURN_MAX_MS;
+      var wait = Math.min(CHURN_BASE_MS * Math.pow(2, c.strikes - 1), CHURN_MAX_MS);
       churnUntil.set(text, now + wait);
       /*
        * 注意：这里**不能**把记录删掉。strikes 必须跨退避留着，否则下次
@@ -252,15 +262,19 @@
        * 退避也永远停在第 1 档（2.0.5 的实际 bug：每 2s 就再闪一下）。
        * 只把窗口计数清零，保留 strikes。
        */
-      churnByText.set(text, { count: 0, since: now, strikes: c.strikes });
+      churnByText.set(text, { count: 0, since: now, strikes: c.strikes, last: now });
       if (options.log) {
         options.log(
           "churn 放弃这一行 " +
+            Math.round(wait) +
+            "ms（约 " +
             Math.round(wait / 1000) +
-            "s（注音反复被重建掉" +
+            "s，注音反复被重建掉" +
             (where ? "，宿主 " + where : "") +
             "）文本=" +
             JSON.stringify(String(text).slice(0, 40)) +
+            " age=" +
+            (churnProbe && churnProbe.__ktAt ? Date.now() - churnProbe.__ktAt + "ms" : "?") +
             " " +
             describePeer(churnProbe)
         );
@@ -530,6 +544,9 @@
       host.insertBefore(tail, refNode);
       // 原文本节点（保留下来那条）的值也被我们改写过，同样算我们的
       if (!leadIsRuby) node.__ktOwned = true;
+      // 记下注音时刻：出问题时 age 能直接区分"我们的注音活了多久"，
+      // 从而分辨"死循环"（几十毫秒就没）和"正常重绘"（活了一两秒）
+      host.__ktAt = Date.now();
 
       // 记录：原节点是否还留在 host 里（leadIsRuby 时它已被移除）、
       // 注音节点清单，以及它原来插在哪个位置（host 的子节点下标）。

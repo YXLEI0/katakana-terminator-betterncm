@@ -443,42 +443,70 @@ test("认输只是暂时的：对方不再重建之后，注音要自己回来",
   assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "注音应该留着");
 });
 
-test("来回打第三次就长时间让开 —— 不能隔几秒闪一下", async () => {
-  // 用户反馈："只有ジオラマ在闪，其他正常"。根因是退避按 4 倍递增
-  // （2s→8s→32s→2min），每次重试都让那个片段再闪一下。
-  // 现在的策略：第一次认输退 2s 给一次机会，之后直接顶到 10 分钟。
+test("短暂的几轮重绘之后要自己稳住 —— 不能一上来就退避十分钟", async () => {
+  // 用户反馈："ジオラマ的英文消失了"、"ライト一直没有"。
+  // 真机轨迹（2.0.8）：
+  //   17:04:09 churn 2s   peer{dirty=false 无wrap=0 ktOwn=1 原文一致=true}
+  //   17:04:12 churn 600s peer{dirty=false 无wrap=0 ktOwn=1 原文一致=true}
+  // 对端状态是健康的、两次之间隔了 3 秒 —— 那是正常重绘，却被当成死循环退了 600s。
   const { doc, p, ann, logs } = fgLine({ churnBaseMs: 30 });
 
-  // 第一轮：打架 → 认输（退 30ms）
+  // 三轮重绘（正常行切换的量级），然后对方就安静了
   fgApplyWrap(doc, p, SEGMENTS);
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     ann.pass();
     fgRestoreUnpatched(p);
     fgApplyWrap(doc, p, SEGMENTS);
   }
-  assert.strictEqual(
-    logs.filter((l) => /churn 放弃这一行 0s/.test(l)).length >= 1,
-    true,
-    "第一次认输应该只退很短（测试里 30ms ≈ 0s）：" + JSON.stringify(logs.slice(-2))
-  );
+  // 对方安静下来之后，最多几轮之内必须自己把注音补回来
+  // （注意 dropDetached 在每轮开头跑，会把退避"续上"，所以不是一次 pass 就能补回）
+  let ok = false;
+  for (let i = 0; i < 8 && !ok; i++) {
+    await sleep(120);
+    ann.pass();
+    ok = p.querySelectorAll("ruby.kt-ruby").length === 1;
+  }
+  assert.ok(ok, "对方安静后应该自己补上注音");
+  assert.strictEqual(kataOffset(p), 0, "补回来的注音要在行首原位");
 
-  // 退避到期 → 重试一次 → 又打起来 → 这次应该直接退到上限 10 分钟
-  await sleep(60);
-  for (let i = 0; i < 4; i++) {
+  const idle = ann.pass();
+  assert.strictEqual(idle.changed + idle.restored, 0, "稳住之后不该再动它");
+
+  // 关键：不能出现"分钟级"的长退避（正常重绘不该被当成死循环）
+  assert.strictEqual(
+    logs.filter((l) => /churn 放弃这一行 (\d+)ms/.test(l) && Number(/churn 放弃这一行 (\d+)ms/.exec(l)[1]) >= 60000).length,
+    0,
+    "正常重绘不该触发长时间退避：" + JSON.stringify(logs.filter((l) => l.indexOf("churn") === 0))
+  );
+});
+
+test("一直打个不停时，退避要按倍数退到上限", async () => {
+  const { doc, p, ann, logs } = fgLine({ churnBaseMs: 20 });
+
+  // 每一轮都推倒重建，退避又极短 —— 连续打十几轮，看退避有没有层层退开
+  for (let i = 0; i < 60; i++) {
     ann.pass();
     fgRestoreUnpatched(p);
     fgApplyWrap(doc, p, SEGMENTS);
+    await sleep(3);
+  }
+
+  const waits = logs
+    .filter((l) => l.indexOf("churn 放弃这一行") === 0)
+    .map((l) => Number((/churn 放弃这一行 (\d+)ms/.exec(l) || [])[1] || 0));
+  assert.ok(waits.length >= 3, "应该判定为打架并多次退避：" + JSON.stringify(waits));
+  for (let i = 1; i < waits.length; i++) {
+    assert.ok(waits[i] > waits[i - 1], "退避时间必须一轮比一轮长：" + JSON.stringify(waits));
   }
   assert.ok(
-    logs.some((l) => /churn 放弃这一行 600s/.test(l)),
-    "第二次认输应该直接退到上限：" + JSON.stringify(logs.slice(-3))
+    waits[waits.length - 1] >= waits[0] * 8,
+    "一直打个不停时要按倍数退开，不能永远按秒重试：" + JSON.stringify(waits)
   );
-
-  // 之后 200ms（远大于第一次的 30ms）内绝不能再重试
-  await sleep(200);
-  let after = 0;
-  for (let i = 0; i < 4; i++) after += ann.pass().changed + ann.pass().restored;
-  assert.strictEqual(after, 0, "长时间退避期内不该再碰它（changed+restored=" + after + "）");
+  // 上限（600000ms）在真机上要连打十几轮才摸得到，这里只守住"不会退到离谱的值"
+  assert.ok(
+    waits.every((w) => w <= 600000),
+    "退避不能超过上限 600000ms：" + JSON.stringify(waits)
+  );
 });
 
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
