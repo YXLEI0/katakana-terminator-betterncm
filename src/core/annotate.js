@@ -441,23 +441,58 @@
      * 一个文本节点 -> 注入后续节点。返回是否改动。
      * 只处理这个节点自己的 nodeValue，不碰别的节点。
      */
+    /*
+     * 跳过原因记录（诊断用）。
+     *
+     * 为什么需要：以前只有「成功注音」会留痕，于是用户说"某一行没注上"时，
+     * 我完全看不到它是"没译文"、"被按行分工让开"还是"在认输期"—— 只能猜，
+     * 而这几轮反复猜错。每轮最多记 6 条，随 pass 一起写进轨迹。
+     */
+    var skipNotes = [];
+    var SKIP_NOTE_MAX = 6;
+
+    function noteSkip(why, text, region, words) {
+      if (skipNotes.length >= SKIP_NOTE_MAX) return;
+      var where = region ? idOf(region) : "?";
+      skipNotes.push(
+        why +
+          " @" +
+          where +
+          " " +
+          JSON.stringify(String(text == null ? "" : text).slice(0, 24)) +
+          (words && words.length ? " 词=" + words.slice(0, 3).join("/") : "")
+      );
+    }
+
     function annotateNode(node, region) {
       var text = node.nodeValue;
       if (!text || text.length < 2) return false;
       if (!matcher.hasKatakana(text)) return false;
 
       var tokens = matcher.scan(text);
-      if (!tokens.length) return false;
+      if (!tokens.length) {
+        noteSkip("切不出词", text, region);
+        return false;
+      }
 
       var glosses = [];
       var any = false;
+      var missing = [];
       for (var i = 0; i < tokens.length; i++) {
         var g = null;
-        if (matcher.looksTranslatable(tokens[i])) g = lookup(tokens[i].norm);
+        if (matcher.looksTranslatable(tokens[i])) {
+          g = lookup(tokens[i].norm);
+          if (!g) missing.push(tokens[i].norm);
+        }
         glosses.push(g);
         if (g) any = true;
       }
-      if (!any) return false;
+      if (!any) {
+        // 这一段里有片假名，但一个词都没查到译文 —— 是"词典没有 + 联网还没回来/失败"，
+        // 不是我们跳过了。真机排障时最容易漏的就是这一种：它不留任何痕迹。
+        noteSkip("无译文", text, region, missing);
+        return false;
+      }
 
       // 有词要标，才动手
       var host = node.parentNode;
@@ -1033,6 +1068,7 @@
 
       // 只清掉宿主已经脱离文档的记录（那块 DOM 已经没了）
       var restored = dropDetached();
+      skipNotes = [];
 
       // 注意判断顺序：传了数组就用传进来的，**哪怕是空数组**。
       // 旧写法 `regions && regions.length ? regions : findRegions(...)`
@@ -1097,6 +1133,14 @@
             !(coexistWithFurigana() && isFuriganaManaged(lineEl))
           ) {
             kanjiSkipped++;
+            // 让位的原因一定要写下来：到底是"对方管着这一行"（正常让位），
+            // 还是"对方没管、我们却也不敢标"（那就会整行漏标，是 bug）。
+            noteSkip(
+              "汉字让位 peer管=" + isFuriganaManaged(lineEl),
+              node.nodeValue,
+              region,
+              [idOf(lineEl)]
+            );
             continue;
           }
         }
@@ -1114,6 +1158,7 @@
         // （我们的 rec.host 就是它那个 wrap），按元素记永远归不了零。
         if (churnSuppressed(node.nodeValue || "")) {
           unstable++;
+          noteSkip("认输期", node.nodeValue, region);
           continue;
         }
 
@@ -1219,6 +1264,11 @@
           }
         }
       }
+      // 把这一轮的"跳过原因"写进轨迹 —— 用户说"某处没注上"时，答案就在这里
+      if (options.log && skipNotes.length) {
+        options.log("未注音 " + skipNotes.join(" | "));
+      }
+      skipNotes = [];
       return {
         scanned: list.length,
         changed: changed,

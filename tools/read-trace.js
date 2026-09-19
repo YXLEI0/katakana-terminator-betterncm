@@ -219,7 +219,17 @@ const files = fs
   })
   .sort((a, b) => b.mt - a.mt);
 
-let best = { text: "", where: "" };
+/*
+ * 每个文件里都可能有一个"当时的完整轨迹"。注意**不能取最长的那个** ——
+ * leveldb 会把旧值留在别的 .ldb 里，最长的那份往往是上一轮的。
+ * 判据用「最后一行的时间戳」：谁最新用谁。
+ */
+function lastStamp(text) {
+  const m = [...String(text).matchAll(/(\d{2}:\d{2}:\d{2}) \[/g)];
+  return m.length ? m[m.length - 1][1] : "";
+}
+
+let best = { text: "", where: "", stamp: "" };
 for (const x of files) {
   const dst = path.join(tmp, x.f);
   try {
@@ -234,12 +244,18 @@ for (const x of files) {
     console.log(`--- ${x.f}: 解析失败 ${e.message}`);
     continue;
   }
+  let local = { text: "", where: x.f, stamp: "" };
   for (const { k, v } of entries) {
     if (k.toString("latin1").indexOf(KEY) === -1) continue;
     const text = decodeValue(v);
-    if (text.length > best.text.length) best = { text, where: `${x.f}` };
+    if (text.length > local.text.length) local = { text, where: x.f, stamp: lastStamp(text) };
   }
-  console.log(`--- ${x.f} (${x.size}B) 条目 ${entries.length}，目前最佳值 ${best.text.length} 字符`);
+  if (local.text) {
+    console.log(`--- ${x.f} (${x.size}B) 条目 ${entries.length}，轨迹 ${local.text.length} 字符，最后一行 ${local.stamp}`);
+    if (local.stamp > best.stamp) best = local;
+  } else {
+    console.log(`--- ${x.f} (${x.size}B) 条目 ${entries.length}，没有这个键`);
+  }
 }
 
 try {

@@ -509,6 +509,53 @@ test("一直打个不停时，退避要按倍数退到上限", async () => {
   );
 });
 
+test("没有译文的片段必须留下「跳过原因」，不能无声无息", () => {
+  // 用户说"某处没注上"时，以前只有成功注音才留痕，于是完全看不到原因，
+  // 只能靠猜（这几轮反复猜错）。现在每种跳过都要写进轨迹。
+  const ctx = loadCore(`<!doctype html><html><head></head><body>
+<ul class="lyric"><li class="line"><p>ゾルバニアに</p></li></ul>
+</body></html>`);
+  forceRubyLayout(ctx, true);
+  const logs = [];
+  const ann = ctx.KTAnnotate.createAnnotator({
+    document: ctx.document,
+    lookup: () => null, // 一个词都查不到
+    annotateAll: true,
+    log: (m) => logs.push(String(m)),
+  });
+  ann.pass();
+
+  const note = logs.find((l) => l.indexOf("未注音") === 0);
+  assert.ok(note, "应该有「未注音」这一行：" + JSON.stringify(logs));
+  assert.ok(note.indexOf("无译文") > 0, "要写明是没译文：" + note);
+  assert.ok(note.indexOf("ゾルバニア") > 0, "要把查不到的词打出来：" + note);
+});
+
+test("按行让位时也要写明「对方到底管没管这一行」", () => {
+  const ctx = loadCore(`<!doctype html><html><head></head><body>
+<ul class="lyric"><li class="line"><p>コーヒーを飲みながら</p></li></ul>
+</body></html>`);
+  forceRubyLayout(ctx, true);
+  const logs = [];
+  const ann = ctx.KTAnnotate.createAnnotator({
+    document: ctx.document,
+    lookup: (w) => ctx.translator.lookup(w),
+    annotateAll: true,
+    skipKanjiLines: true,
+    coexistWithFurigana: true, // 但这一行没有 jp-furigana 的标记 → 整行让开
+    log: (m) => logs.push(String(m)),
+  });
+  ann.pass();
+
+  const note = logs.find((l) => l.indexOf("未注音") === 0);
+  assert.ok(note, "应该有「未注音」这一行：" + JSON.stringify(logs));
+  assert.ok(note.indexOf("汉字让位") > 0, "要写明是让位：" + note);
+  assert.ok(
+    note.indexOf("peer管=false") > 0,
+    "关键是写明对方管没管这一行 —— peer管=false 就说明是我们误让位了：" + note
+  );
+});
+
 test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
   const { doc, p, ann, logs } = fgLine();
 
