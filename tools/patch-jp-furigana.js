@@ -45,15 +45,21 @@ const MARK = "/* KT-COEXIST-PATCH */";
 
 const HELPER = `
 	// ${MARK}
-	// 判断子节点是不是别的插件（片假名终结者）插进来的注音。
+	// 判断子节点是不是别的插件插进来的注音。
 	// 这类节点不该让 isClean() 判定"行被外人改过"。
+	//
+	// 目前要认两家（都是同一个作者、可能同时开着）：
+	//   kt-ruby / kt-rt —— 片假名终结者（片假名 -> 英文）
+	//   lt-ruby / lt-rt —— 拉丁字母片假名注音（拉丁词 -> 片假名读音）
+	// 少认一家的后果是实打实的：那家的注音会让这一行被判脏并重建，
+	// 于是那一家开始闪 —— 而且是"只有它一家闪"，非常难查。
 	function __ktIsForeign(node) {
 		if (!node || node.nodeType !== 1) return false;
 		const cls = typeof node.className === 'string' ? node.className : '';
-		if (/(^|\\s)(kt-ruby|kt-rt|kt-ov-label)(\\s|$)/.test(cls)) return true;
+		if (/(^|\\s)(kt-ruby|kt-rt|kt-ov-label|lt-ruby|lt-rt|lt-ov-label)(\\s|$)/.test(cls)) return true;
 		if (node.tagName === 'RT' && node.parentNode) {
 			const pc = typeof node.parentNode.className === 'string' ? node.parentNode.className : '';
-			if (/(^|\\s)kt-ruby(\\s|$)/.test(pc)) return true;
+			if (/(^|\\s)(kt-ruby|lt-ruby)(\\s|$)/.test(pc)) return true;
 		}
 		return false;
 	}
@@ -66,7 +72,12 @@ const HELPER = `
 		return n;
 	}
 
-	// 这条 MutationRecord 是不是"片假名终结者插注音"引起的？
+	// 这个文本节点是不是注音插件改写/新建的？（两家各用自己的标记位）
+	function __ktTextIsOurs(n) {
+		return !!(n && n.nodeType === 3 && (n.__ktOwned || n.__ltOwned));
+	}
+
+	// 这条 MutationRecord 是不是"某个注音插件插注音"引起的？
 	// 是的话就不该因此把歌词行标脏 —— 否则每次它插节点我们都会重建整行，
 	// 两边来回就是闪烁。
 	function __ktRecordIsOurs(r) {
@@ -75,19 +86,19 @@ const HELPER = `
 			if (r.addedNodes && r.addedNodes.length) {
 				let allOurs = true;
 				for (const n of r.addedNodes) {
-					if (!__ktIsForeign(n) && !(n.nodeType === 3 && n.__ktOwned)) { allOurs = false; break; }
+					if (!__ktIsForeign(n) && !__ktTextIsOurs(n)) { allOurs = false; break; }
 				}
 				if (allOurs) return true;
 			}
 			if (r.removedNodes && r.removedNodes.length) {
 				let allOurs = true;
 				for (const n of r.removedNodes) {
-					if (!__ktIsForeign(n) && !(n.nodeType === 3 && n.__ktOwned)) { allOurs = false; break; }
+					if (!__ktIsForeign(n) && !__ktTextIsOurs(n)) { allOurs = false; break; }
 				}
 				if (allOurs) return true;
 			}
 			// characterData：改的是我们留下的那段文本节点
-			if (r.type === 'characterData' && r.target && r.target.__ktOwned) return true;
+			if (r.type === 'characterData' && __ktTextIsOurs(r.target)) return true;
 			// 变更目标本身就在我们的注音节点内部
 			if (r.target && r.target.nodeType === 1 && __ktIsForeign(r.target)) return true;
 		} catch (e) { /* ignore */ }

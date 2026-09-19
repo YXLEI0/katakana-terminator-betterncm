@@ -1,5 +1,32 @@
 # 更新记录
 
+## 2.1.1
+
+**和第三个注音插件「拉丁字母片假名注音」互相认账。**
+那个插件把拉丁词注上片假名读音（`light` → ライト），注出来的**恰恰是片假名** ——
+正是本插件的翻译对象。三个插件同时开着时，每一家都在数"这行的内容有没有被外人动过"，
+少认一家的后果不是"少标一点"，而是那一家的注音每轮都被判成"底字变了"，
+于是**只有那一家在闪**，极难查（这一轮的教训：认不认得出对方，是可观测的行为，得有用例钉住）。
+
+| 位置 | 改动 |
+| --- | --- |
+| `tools/patch-jp-furigana.js` | 补丁注入的 `__ktIsForeign()` 除 `kt-*` 外也认 `lt-ruby` / `lt-rt` / `lt-ov-label`；新增 `__ktTextIsOurs()`，`__ktOwned` 与 `__ltOwned` 都算"注音插件改写的文本节点"（observer 才不会把行标脏） |
+| `annotate.js` `isSkippable()` | 也跳过 `lt-ruby` / `lt-rt`，不能进对方注音节点内部去注音 |
+| `annotate.js` `lineHasKanji()` / `visibleText()` | 判"看得见的原文"时把 `lt-rt` 也剔掉（`kt-rt` / `fg-rt` 同列） |
+
+补丁只打一次就够三家共用；已经打过旧补丁的机器重新跑
+`npm run patch:furigana -- --force` 即可。
+
+**真机以外的证据**：`tests/coexist.test.js` 新增两条用例（真 `<ruby>` 与降级成
+`<span>` 各一条）。降级那条是**会失败的用例** —— 把 `annotate.js` 的改动撤掉它就红
+（内核不支持 ruby 时没有 `<rt>` 标签可认，只剩 class）。第一条只证明"不越界"，
+因为 `<rt>` 本来就在 `SKIP_TAGS` 里。
+
+### 状态
+
+- `npm run test:serial` **92 个用例**全过（matcher 14 / annotate 22 / coexist 23 / patch 5 / translate 14 / integration 14）
+- `npm run check` 通过
+
 ## 2.1.0（定稿）
 
 这一版**不改行为**（2.0.14 已经跑通），只做清理与归档 —— 把这一轮迭代里攒下的

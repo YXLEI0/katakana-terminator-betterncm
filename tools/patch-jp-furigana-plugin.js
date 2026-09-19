@@ -153,6 +153,24 @@ function main() {
   if (args.includes("--check")) {
     console.log(patchedNow ? "包内已打补丁" : "包内未打补丁");
     console.log("备份存在: " + fs.existsSync(bak));
+    /*
+     * 只报"打过补丁"是不够的：补丁内容本身会变（2.1.1 就把识别范围从一家扩到两家）。
+     * 拿备份当基准重新打一遍，和包里的实际内容逐字节比 —— 不一致就是旧补丁，
+     * 应该重跑 --force。这个判断只有"有备份"时才做得了。
+     */
+    if (patchedNow && fs.existsSync(bak)) {
+      const bakMain = readZip(fs.readFileSync(bak)).find((e) => e.name === "main.js");
+      if (bakMain) {
+        const want = applyPatch(bakMain.data.toString("utf8"));
+        if (want.error) {
+          console.log("补丁内容: 无法比对（当前工具打不上备份，锚点失配）");
+        } else if (want.src === src) {
+          console.log("补丁内容: 与当前工具一致");
+        } else {
+          console.log("补丁内容: **旧补丁**（与当前工具打出来的不一样，请重跑 --force）");
+        }
+      }
+    }
     return;
   }
 

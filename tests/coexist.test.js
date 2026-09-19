@@ -135,6 +135,68 @@ test("重复扫描稳定，不会反复重注", () => {
   }
 });
 
+/*
+ * 第三个插件：latin-katakana（拉丁字母片假名注音，拉丁词 -> 片假名读音）。
+ *
+ * 它注出来的读音**恰恰是片假名** —— 正是本插件的翻译对象。所以那一层必须像
+ * 别的注音一样被整棵排除，否则我们会跑到对方的注音节点里面再注一层
+ * （"ライト" 上面再挂一个 "light"），而且每轮都认为底字变了。
+ */
+function checkPeerAnnotation(peerUsesRuby) {
+  /*
+   * 对方注音节点里放的是「ギター」—— 一个**本插件一定能翻译**的片假名词。
+   * 这一点是刻意的：如果放一个字典里没有的词（比如 ライト），
+   * 就算我们真的走进了对方的注音节点也注不出东西，测试会假过。
+   * 行里的另一个词用 ピアノ，用来确认这一行我们确实处理了。
+   */
+  const PEER_HTML = `<!doctype html><html><head></head><body>
+<ul class="lyric">
+  <li class="line"><p>きらめく と ピアノ</p></li>
+</ul>
+</body></html>`;
+  const ctx = loadCore(PEER_HTML);
+  forceRubyLayout(ctx, true);
+  const ann = annotator(ctx);
+  const p = ctx.document.querySelector("ul.lyric li p");
+  const wrap = ctx.document.createElement(peerUsesRuby ? "ruby" : "span");
+  wrap.className = "lt-ruby";
+  wrap.appendChild(ctx.document.createTextNode("light"));
+  const rt = ctx.document.createElement(peerUsesRuby ? "rt" : "span");
+  rt.className = "lt-rt";
+  rt.appendChild(ctx.document.createTextNode("ギター"));
+  wrap.appendChild(rt);
+  p.insertBefore(wrap, p.firstChild);
+  ann.pass();
+
+  assert.strictEqual(
+    p.querySelectorAll(".lt-ruby ruby.kt-ruby, .lt-rt ruby.kt-ruby").length,
+    0,
+    "不能进到对方的注音节点里再注一层（ギター 是能翻译的词，注上就是越界）：" + p.innerHTML
+  );
+  assert.strictEqual(p.querySelector(".lt-rt").textContent, "ギター", "对方的注音文字不许被改写");
+  assert.ok(
+    [...p.querySelectorAll("ruby.kt-ruby")].some(
+      (r) => r.childNodes[0].nodeValue === "ピアノ" && r.querySelector(".kt-rt").textContent === "piano"
+    ),
+    "同一行里我们该标的照样标：" + baseText(p)
+  );
+  for (let i = 0; i < 3; i++) {
+    const r = ann.pass();
+    assert.strictEqual(r.changed, 0, `第 ${i + 2} 轮不该改（对方注音不该让底字判成变了）`);
+    assert.strictEqual(r.restored, 0, `第 ${i + 2} 轮不该还原`);
+  }
+}
+
+test("同行有 latin-katakana 的注音（真 <ruby>）：不进去注，也不判底字变了", () => {
+  checkPeerAnnotation(true);
+});
+
+test("同行有 latin-katakana 的注音（降级成 <span>）：靠 class 也要认出来", () => {
+  // 内核不支持 ruby 时两家都降级成 span。这条路径上没有 <rt> 可以靠标签名兜底，
+  // 只能靠 lt-ruby / lt-rt 这两个 class —— 漏认就是"给它人的注音做注解"。
+  checkPeerAnnotation(false);
+});
+
 /** 造一个"已被 jp-furigana 接管"的含汉字歌词行 */
 function managedKanjiLine(ctx) {
   const li = ctx.document.querySelectorAll("ul.lyric li")[0];

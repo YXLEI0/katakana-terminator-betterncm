@@ -96,6 +96,12 @@ npm run patch:furigana -- --revert
 > 症状是歌词开始抽搐、或者某一个词反复闪，重新跑一次 `npm run patch:furigana -- --force` 即可。
 > `tests/patch.test.js` 会盯住这 5 个锚点，jp-furigana 改动导致锚点失效会在 CI 里直接报出来。
 
+补丁里的判定**同时认两家注音插件**：`kt-ruby` / `kt-rt`（本插件，片假名 → 英文）和
+`lt-ruby` / `lt-rt`（[拉丁字母片假名注音](https://github.com/YXLEI0/latin-katakana-betterncm)，
+拉丁词 → 片假名读音）。三家同时开着时，少认一家的后果不是"少标一点"，而是那一家
+每插一个注音就被判成"行被外人改过"，于是**只有它一家在闪** —— 非常难查。
+所以这一个 `.plugin` 补丁对三家都够用，装一次即可。
+
 ### 打架时的自保
 
 万一对方插件在无条件重建某一行（真死循环：我们注什么、几十毫秒内就被抹掉），

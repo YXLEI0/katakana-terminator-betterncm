@@ -434,7 +434,8 @@
       if (!el || el.nodeType !== 1) return true;
       if (SKIP_TAGS[el.tagName]) return true;
       if (el.isContentEditable) return true;
-      if (el.classList && el.classList.contains("kt-ruby")) return true;
+      // 别进任何一家的注音节点内部（自家的，以及 latin-katakana 的）
+      if (el.classList && (el.classList.contains("kt-ruby") || el.classList.contains("lt-ruby"))) return true;
       // 我们自己插的注音节点
       if (el.tagName === "RT" || (el.classList && el.classList.contains("kt-rt"))) return true;
       return false;
@@ -783,7 +784,9 @@
           for (var p = node.parentNode; p && p !== lineEl; p = p.parentNode) {
             if (p.tagName === "RT" || p.tagName === "RP") return NodeFilter.FILTER_REJECT;
             var c = typeof p.className === "string" ? p.className : "";
-            if (/(^|\s)(fg-rt|kt-rt|kt-ov-label)(\s|$)/.test(c)) return NodeFilter.FILTER_REJECT;
+            if (/(^|\s)(fg-rt|kt-rt|lt-rt|kt-ov-label|lt-ov-label)(\s|$)/.test(c)) {
+              return NodeFilter.FILTER_REJECT;
+            }
           }
           return NodeFilter.FILTER_ACCEPT;
         },
@@ -914,7 +917,16 @@
       var walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
         acceptNode: function (node) {
           for (var p = node.parentNode; p && p !== el; p = p.parentNode) {
-            if (p.tagName === "RT" || (p.classList && p.classList.contains("kt-rt"))) {
+            /*
+             * 必须把**三家的注音**都排除：自家 kt-rt、jp-furigana 的 fg-rt、
+             * 以及 latin-katakana 的 lt-rt。少认一家的后果不是"少标一点"，
+             * 而是把对方的注音当成"底字变了"，于是每轮都判定失效并重注 —— 就是闪。
+             * （<rt> 一律排除，因为三家在 ruby 可用时都用真 <rt>；下面这个 class
+             *   判断是给"内核不支持 ruby、降级成 span"的情况兜底。）
+             */
+            if (p.tagName === "RT" || p.tagName === "RP") return NodeFilter.FILTER_REJECT;
+            var ac = typeof p.className === "string" ? p.className : "";
+            if (/(^|\s)(kt-rt|lt-rt|fg-rt|kt-ov-label|lt-ov-label)(\s|$)/.test(ac)) {
               return NodeFilter.FILTER_REJECT;
             }
           }
