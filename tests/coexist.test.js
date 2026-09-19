@@ -296,3 +296,100 @@ test("jp-furigana 还原后不再重 wrap 时，不留重复注音", () => {
   assert.strictEqual(p.textContent.replace(/coffee/g, "").trim(), "コーヒーを飲みながら", "底字要完整且不重复");
 });
 
+// ---------------------------------------------------------------------------
+// 没打补丁的 jp-furigana：它会把我们引起的每一次 DOM 变更都当成「行被外人改过」，
+// 于是无条件重建整行，我们的注音随之被丢掉。
+// 真机轨迹里就是 `[pass] changed=18 restored=18` 每秒重复 —— 肉眼是抽搐。
+// 插件必须自己认输，不能一直跟着重建。
+// ---------------------------------------------------------------------------
+
+/** 没打补丁的 restore()：不暂存外来节点，wrap 连同我们的注音一起丢掉 */
+function fgRestoreUnpatched(host) {
+  const wrap = host.__fgWrap;
+  if (wrap && wrap.parentNode === host) {
+    wrap.remove();
+    if (!host.hasChildNodes() && host.__fgOrig && host.__fgOrig.length) host.append(...host.__fgOrig);
+  }
+  host.__fgWrap = null;
+}
+
+/** 可见底字：把两种注音（我们的 rt 和对方的 fg-rt）都剔掉 */
+function baseText(el) {
+  const clone = el.cloneNode(true);
+  for (const n of clone.querySelectorAll("rt, .kt-rt, .fg-rt")) n.remove();
+  return clone.textContent;
+}
+
+/** 造好"一行被 jp-furigana 接管的歌词" + 带 log 收集器的 annotator */
+function fgLine() {
+  const ctx = loadCore(KATAKANA_LINE);
+  forceRubyLayout(ctx, true);
+  const doc = ctx.document;
+  doc.querySelector("li.line").__fgText = "コーヒーを飲みながら"; // 归 jp-furigana 管
+  const p = doc.getElementById("L");
+  const logs = [];
+  const ann = ctx.KTAnnotate.createAnnotator({
+    document: doc,
+    lookup: (w) => ctx.translator.lookup(w),
+    annotateAll: true,
+    skipKanjiLines: true,
+    coexistWithFurigana: true,
+    log: (m) => logs.push(String(m)),
+  });
+  return { ctx, doc, p, ann, logs };
+}
+
+test("对手无条件重建时，插件会认输停手，而不是无限对打", () => {
+  const { doc, p, ann, logs } = fgLine();
+
+  // 前几轮：对方重建 → 我们的宿主（它那个 wrap span）整个没了 → 我们重注 → 它又重建……
+  fgApplyWrap(doc, p, SEGMENTS);
+  let fought = 0;
+  for (let i = 0; i < 6; i++) {
+    const r = ann.pass();
+    fought += r.changed + r.restored;
+    fgRestoreUnpatched(p);
+    fgApplyWrap(doc, p, SEGMENTS);
+  }
+  assert.ok(fought >= 6, "前提：这个对手确实在和我们反复对打（changed+restored=" + fought + "）");
+  assert.ok(
+    logs.some((l) => l.indexOf("churn 放弃这一行") === 0),
+    "对打到阈值后应该主动认输，并留下轨迹：" + JSON.stringify(logs.slice(-3))
+  );
+
+  // 认输之后对方再怎么重建，我们也不再跟着注 —— 这就是"停手"
+  let after = 0;
+  for (let i = 0; i < 6; i++) {
+    const r = ann.pass();
+    after += r.changed + r.restored;
+  }
+  assert.strictEqual(after, 0, `认输之后不该再往这一行插注音（changed+restored=${after}）`);
+  assert.strictEqual(baseText(p).trim(), "コーヒーを飲みながら", "底字不能被打乱");
+});
+
+test("对方重建但歌词真的换了一句 —— 不能因此认输", () => {
+  const { doc, p, ann, logs } = fgLine();
+
+  // 每一句都是新歌词（真机上就是正常播放），且每句都伴随一次推倒重建
+  const lines = [
+    [{ text: "コーヒーを" }, { text: "飲み", rt: "の" }, { text: "ながら" }],
+    [{ text: "ギターと" }, { text: "ピアノ", rt: "ぴあの" }, { text: "のセッション" }],
+    [{ text: "スマホを" }, { text: "ポケット", rt: "ぽけっと" }, { text: "に" }],
+    [{ text: "コンピューター" }, { text: "の前に" }, { text: "座る", rt: "すわる" }],
+    [{ text: "インターネット" }, { text: "の" }, { text: "海", rt: "うみ" }],
+  ];
+  let changed = 0;
+  for (const segs of lines) {
+    fgRestoreUnpatched(p);
+    fgApplyWrap(doc, p, segs);
+    changed += ann.pass().changed;
+  }
+
+  assert.ok(changed >= 4, "每句新歌词都该被标上（实际 changed=" + changed + "）");
+  assert.strictEqual(
+    logs.filter((l) => l.indexOf("churn 放弃这一行") === 0).length,
+    0,
+    "正常换行不该被当成打架而认输"
+  );
+});
+

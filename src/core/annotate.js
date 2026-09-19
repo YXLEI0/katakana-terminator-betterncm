@@ -137,6 +137,86 @@
     var motionByHost = new WeakMap();
     var MOTION_LIMIT = 3; // 连续变化超过这个次数就判定为"在动"，放弃
 
+    /*
+     * 自动避让：认输，别再跟一个"无条件重建这一行"的插件对打。
+     *
+     * 背景（真机轨迹）：jp-furigana 的共存补丁一旦失效（例如它自己升级，
+     * .plugin 被换掉，补丁没了），它会把我们引起的每一次 DOM 变更都当成
+     * "行被外人改过"，于是它重建、我们重注、它再重建 —— 轨迹里
+     * `[pass] changed=18 restored=18` 每秒重复，肉眼就是一直抽搐。
+     *
+     * 这种循环我们永远追不上，唯一有用的动作是**松手**。判据是：
+     * 「可见文本一个字都没变，我们却反复判定注音失效」——正常的换行是文本变了，
+     * 不算；正常的一秒一行也不会触发。只有对方在无条件重建才会出现这个特征。
+     *
+     * 键用**文本**而不是元素：对方每次重建都换一个新元素（wrap 是新建的 span），
+     * 按元素记永远归不了零，按文本才能跨重建累计。
+     *
+     * 认输不是永久的：退避时间按 4 倍递增（15s → 1min → 4min → 封顶 10min），
+     * 每轮只闪一下就退回去。这样对方修好（补丁打上）之后会自动恢复，
+     * 而不需要我们重启插件。
+     */
+    var churnByText = new Map(); // 文本 -> { count, since, strikes }
+    var churnUntil = new Map(); // 文本 -> 退避截止时间戳
+    var CHURN_WINDOW_MS = 4000; // 计数窗口
+    var CHURN_LIMIT = 4; // 窗口内超过这个次数就认输
+    var CHURN_BASE_MS = 15000; // 第一次退避
+    var CHURN_MAX_MS = 600000; // 退避上限
+    var CHURN_MAX_ENTRIES = 200; // 兜底：别让 Map 无限长
+
+    function churnPrune() {
+      if (churnByText.size <= CHURN_MAX_ENTRIES && churnUntil.size <= CHURN_MAX_ENTRIES) return;
+      var now = Date.now();
+      churnUntil.forEach(function (until, k) {
+        if (now >= until) churnUntil.delete(k);
+      });
+      var over = churnByText.size - CHURN_MAX_ENTRIES;
+      if (over > 0) {
+        var it = churnByText.keys();
+        for (var i = 0; i < over; i++) {
+          var k2 = it.next();
+          if (k2.done) break;
+          churnByText.delete(k2.value);
+        }
+      }
+    }
+
+    /** 这段文本是不是正在"认输期"，这一轮别碰它 */
+    function churnSuppressed(text) {
+      if (!text) return false;
+      var until = churnUntil.get(text);
+      if (until == null) return false;
+      if (Date.now() < until) return true;
+      churnUntil.delete(text); // 退避结束，再试一次
+      return false;
+    }
+
+    /** 记一次"文本没变但注音失效"；到达阈值就进入退避 */
+    function noteChurn(text) {
+      if (!text) return;
+      var now = Date.now();
+      var c = churnByText.get(text);
+      if (!c || now - c.since > CHURN_WINDOW_MS) c = { count: 0, since: now, strikes: (c && c.strikes) || 0 };
+      c.count++;
+      if (c.count < CHURN_LIMIT) {
+        churnByText.set(text, c);
+        return;
+      }
+      c.strikes++;
+      var wait = Math.min(CHURN_BASE_MS * Math.pow(4, c.strikes - 1), CHURN_MAX_MS);
+      churnUntil.set(text, now + wait);
+      churnByText.delete(text);
+      if (options.log) {
+        options.log(
+          "churn 放弃这一行 " +
+            Math.round(wait / 1000) +
+            "s（文本没变却反复失效，八成是对方插件在无条件重建）文本=" +
+            JSON.stringify(String(text).slice(0, 40))
+        );
+      }
+      churnPrune();
+    }
+
     var decidedByHost = new WeakMap();
 
     // 不进去的标签
@@ -592,6 +672,11 @@
           var n = rec.nodes[j];
           if (n.parentNode) n.parentNode.removeChild(n);
         }
+        // 宿主整个被摘掉 = 我们刚注的那段文字连同容器一起被对方丢弃了。
+        // 这正是"对方在无条件重建这一行"的表现，计入 churn。
+        // （真机案例：没打补丁的 jp-furigana 每次重建都新建一个 wrap span，
+        //  我们的 rec.host 就是它，于是每轮都走这里 —— changed=18 restored=18。）
+        noteChurn(rec.plain);
         records.delete(dead[i]);
       }
       return dead.length;
@@ -634,29 +719,39 @@
      */
     function isStale(rec, node) {
       var host = rec.host;
-      if (!host || !host.isConnected) return true;
+      if (!host || !host.isConnected) {
+        logStale(rec, "宿主脱链");
+        return true;
+      }
       // 只有「保留了原节点」的记录才检查它还在不在；
       // 文本以片假名开头时原节点本来就被移除了，不能拿这个当失效依据
       // （否则每轮都会判定为馊了，变成一直闪）。
-      if (rec.kept && node.parentNode !== host) return true;
+      if (rec.kept && node.parentNode !== host) {
+        logStale(rec, "原文本节点被摘走");
+        return true;
+      }
       var now = visibleText(host);
       if (now !== rec.plain) {
         // 记下失败现场：到底算出什么、原文是什么、DOM 长什么样。
-        if (options.log) {
-          options.log(
-            "失效 plain=" +
-              JSON.stringify(rec.plain.slice(0, 50)) +
-              " now=" +
-              JSON.stringify(now.slice(0, 50)) +
-              " kept=" +
-              rec.kept +
-              " html=" +
-              JSON.stringify(String(host.innerHTML || "").slice(0, 160))
-          );
-        }
+        logStale(rec, "可见文本变了", now);
         return true;
       }
       return false;
+    }
+
+    /** 诊断用：把「为什么判定失效」写进轨迹（只在给了 log 时） */
+    function logStale(rec, why, now) {
+      if (!options.log) return;
+      options.log(
+        "失效[" +
+          why +
+          "] plain=" +
+          JSON.stringify(String(rec.plain == null ? "" : rec.plain).slice(0, 40)) +
+          " now=" +
+          JSON.stringify(String(now == null ? "" : now).slice(0, 40)) +
+          " kept=" +
+          !!rec.kept
+      );
     }
 
     /**
@@ -843,6 +938,15 @@
         var hostEl = node.parentNode;
         var visibleNow = hostEl ? visibleText(hostEl) : "";
 
+        // 这一行已经被判定为"跟我们打架"：认输期内不再碰它。
+        // 认输的判据是「同一段文字被我们注了又失效、反复好几次」——
+        // 键必须用**文字**：对方每次重建都新建一个 <span> 当宿主
+        // （我们的 rec.host 就是它那个 wrap），按元素记永远归不了零。
+        if (churnSuppressed(node.nodeValue || "")) {
+          unstable++;
+          continue;
+        }
+
         // 这个 host 的可见文本是不是一直在变？一直在变就放弃它，
         // 别再追着重注 —— 追就是抽搐。
         if (hostEl) {
@@ -887,6 +991,10 @@
           // 那 DOM 里已经没有我们的痕迹了，这时**不需要还原** ——
           // 「还原」本身是一连串 DOM 变更（摘节点 + 写回文本），
           // 在真机上就是可见的一闪。直接丢掉记录、往下重新注音即可。
+          // 文本一模一样却判定失效 —— 这是"对方在无条件重建这一行"的特征。
+          // 注意要在 restore / 删记录**之前**判断：restoreRecord 会把原文写回去，
+          // 之后就分不清到底是"文本变了"还是"文本没变"了。
+          if (rec.plain != null) noteChurn(rec.plain);
           if (annotationsIntact(rec)) {
             restoreRecord(node, rec);
             restored++;
