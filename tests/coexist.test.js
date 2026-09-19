@@ -75,7 +75,7 @@ test("我们插的节点带标记，便于对方的 observer 识别", () => {
   assert.ok(owned, "我们改写过/新建的文本节点要带 __ktOwned");
 });
 
-test("会消费 host.__ktForeign 并把注音挂回原位", () => {
+test("会消费 host.__ktForeign：清掉暂存，注音由正常流程补回", () => {
   const ctx = loadCore(HTML);
   forceRubyLayout(ctx, true);
   const ann = ctx.KTAnnotate.createAnnotator({
@@ -96,11 +96,12 @@ test("会消费 host.__ktForeign 并把注音挂回原位", () => {
   p.removeChild(ruby);
   host.__ktForeign = [ruby];
 
-  // 我们再跑一轮：应当把它挂回去并清空暂存
+  // 我们再跑一轮：暂存必须被清掉，注音由正常注音流程重新标出来
+  // （不能把旧节点挂回去 —— 它的位置信息已经丢了，见 annotate.js 里的说明）
   ann.restoreAll();
   ann.pass();
   assert.strictEqual(host.__ktForeign, null, "暂存要被清空，避免越积越多");
-  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "注音要补回原位");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "注音要补回来");
 });
 
 test("重复扫描稳定，不会反复重注", () => {
@@ -166,3 +167,132 @@ test("共存开关传函数时每轮重算——设置改完不用重启就生�
     "开关打开后，下一轮扫描就该标上（不能只在初始化时读一次）"
   );
 });
+
+// ---------------------------------------------------------------------------
+// jp-furigana 的 DOM 改写模型
+//
+// 真机上「注音在行首和行尾来回横跳」就是这里暴露出来的：它 wrap 一整行时把
+// 宿主原有的子节点整批搬进 __fgOrig，然后 replaceChildren(wrap)；
+// restore 时再 wrap.remove() + host.append(...__fgOrig)。
+// 下面忠实照抄这两步（含 tools/patch-jp-furigana.js 的补丁语义），
+// 用来复现"注音位置被挪走"的两种情况。
+// ---------------------------------------------------------------------------
+
+const KATAKANA_LINE = `<!doctype html><html><head></head><body>
+<ul class="lyric">
+  <li class="line"><p id="L">コーヒーを飲みながら</p></li>
+</ul>
+</body></html>`;
+
+// 片假名在**行首**，汉字在中间 —— 用户报的正是这种行
+const SEGMENTS = [{ text: "コーヒーを" }, { text: "飲み", rt: "の" }, { text: "ながら" }];
+
+function fgApplyWrap(doc, host, segments) {
+  host.__fgOrig = [...host.childNodes];
+  const wrap = doc.createElement("span");
+  wrap.className = "fg-line";
+  for (const seg of segments) {
+    if (seg.rt) {
+      const holder = doc.createElement("span");
+      holder.className = "fg-ruby";
+      const ruby = doc.createElement("ruby");
+      ruby.appendChild(doc.createTextNode(seg.text));
+      const rt = doc.createElement("rt");
+      rt.className = "fg-rt";
+      rt.textContent = seg.rt;
+      ruby.appendChild(rt);
+      holder.appendChild(ruby);
+      wrap.appendChild(holder);
+    } else {
+      wrap.appendChild(doc.createTextNode(seg.text));
+    }
+  }
+  host.replaceChildren(wrap);
+  host.__fgWrap = wrap;
+}
+
+function fgRestore(host) {
+  const wrap = host.__fgWrap;
+  if (wrap && wrap.parentNode === host) {
+    // 补丁第二条：拆 wrap 前把我们插在里面的注音暂存到 expando
+    const foreign = [...wrap.querySelectorAll("ruby.kt-ruby")];
+    if (foreign.length) host.__ktForeign = foreign;
+    wrap.remove();
+    // 只有 host 空了才放回原节点（原版逻辑，靠它把原文还原回来）
+    if (!host.hasChildNodes() && host.__fgOrig && host.__fgOrig.length) host.append(...host.__fgOrig);
+  }
+  host.__fgWrap = null;
+}
+
+/** 行内可见底字里，位于第一个片假名注音之前的字符数 —— 越小越靠前 */
+function kataOffset(host) {
+  const ruby = host.querySelector("ruby.kt-ruby");
+  if (!ruby) return -1;
+  let pos = 0;
+  let found = -1;
+  (function walk(n) {
+    for (const c of n.childNodes) {
+      if (c === ruby) {
+        found = pos;
+        return true;
+      }
+      if (c.nodeType === 3) {
+        pos += c.nodeValue.replace(/\s/g, "").length;
+      } else {
+        const cls = typeof c.className === "string" ? c.className : "";
+        const isAnnotation = c.tagName === "RT" || /(^|\s)(kt-rt|fg-rt)(\s|$)/.test(cls);
+        if (!isAnnotation && walk(c)) return true;
+      }
+    }
+    return false;
+  })(host);
+  return found;
+}
+
+function kataLine(opts) {
+  const ctx = loadCore(KATAKANA_LINE);
+  forceRubyLayout(ctx, true);
+  const doc = ctx.document;
+  const li = doc.querySelector("li.line");
+  const p = doc.getElementById("L");
+  li.__fgText = "コーヒーを飲みながら"; // 这行归 jp-furigana 管
+  // 这两个用例测的都是「共存开关已打开 + 补丁已打」的状态
+  return { ctx, doc, li, p, ann: annotator(ctx, !(opts && opts.coexist === false)) };
+}
+
+test("以片假名开头的行：注音必须落在原位，不能被挪到行尾", () => {
+  const { doc, p, ann } = kataLine();
+  fgApplyWrap(doc, p, SEGMENTS);
+
+  ann.pass();
+  assert.strictEqual(kataOffset(p), 0, "コーヒー 的注音应该在行首，而不是跑到 飲みながら 后面");
+
+  // jp-furigana 因为行脏而还原 + 重新 wrap，我们跟着再注一次
+  for (let i = 0; i < 3; i++) {
+    fgRestore(p);
+    fgApplyWrap(doc, p, SEGMENTS);
+    ann.restoreAll();
+    ann.pass();
+    assert.strictEqual(kataOffset(p), 0, `第 ${i + 1} 轮之后注音位置又跑了`);
+    assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1, "注音不能重复");
+  }
+});
+
+test("jp-furigana 还原后不再重 wrap 时，不留重复注音", () => {
+  const { doc, p, ann } = kataLine();
+  fgApplyWrap(doc, p, SEGMENTS);
+  ann.pass();
+  assert.strictEqual(p.querySelectorAll("ruby.kt-ruby").length, 1);
+
+  // 只剩还原、不再 wrap：它暂存的旧注音（host.__ktForeign）会在我们下一轮被消费
+  fgRestore(p);
+  assert.strictEqual((p.__ktForeign || []).length, 1, "前提：它确实暂存了旧注音");
+
+  ann.pass();
+  const rubies = [...p.querySelectorAll("ruby.kt-ruby")];
+  assert.strictEqual(rubies.length, 1, "旧注音不能又被挂回来，变成重复注音");
+  assert.strictEqual(kataOffset(p), 0, "重新注音的位置要在原位");
+  assert.strictEqual(p.__ktForeign, null, "暂存要清掉，别一直挂着脱离文档的节点");
+  assert.strictEqual(p.textContent.replace(/coffee/g, "").trim(), "コーヒーを飲みながら", "底字要完整且不重复");
+});
+

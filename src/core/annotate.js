@@ -234,6 +234,17 @@
       var host = node.parentNode;
       if (!host) return false;
 
+      // 原节点在 host 里的下标。必须在动 DOM 之前算好：leadIsRuby 时原节点
+      // 会被摘掉，摘完再遍历就找不到它，index 会留在 0，还原时整段原文
+      // 会被插到宿主行首（和上面 refNode 是同一类坑）。
+      var origIndex = 0;
+      for (var ci = 0; ci < host.childNodes.length; ci++) {
+        if (host.childNodes[ci] === node) {
+          origIndex = ci;
+          break;
+        }
+      }
+
       // 关键：不替换原文本节点，只把它「切短」，注音作为兄弟节点插在中间。
       //
       // 为什么这样做：React 更新纯文本时执行的是 setTextContent(node)，
@@ -271,6 +282,16 @@
       // 例外：文本正好以片假名词开头时，第 0 段本身带注音，不能既留原文又插注音
       // （那样底字会渲染两遍）。这种情况直接移除原节点，注音从第 0 段开始排。
       var leadIsRuby = !!pieces[0].ruby;
+      /*
+       * 插入位置必须在动 DOM **之前**取好。
+       *
+       * leadIsRuby 时下面会把原节点从 host 里摘掉，摘掉之后 `node.nextSibling`
+       * 恒为 null，于是 `host.insertBefore(tail, null)` 等价于「挂到 host 末尾」——
+       * 以片假名词开头的文本会被整段挪到宿主的结尾。真机上就是：中文/汉字部分
+       * 在行首、片假名注音跑到行尾；下一轮还原又把原节点按原下标放回行首，
+       * 再注音又挪到行尾，肉眼正是「注音在行首和行尾来回横跳」。
+       */
+      var refNode = node.nextSibling;
       var tail = doc.createDocumentFragment();
       var startIndex = 0;
       if (!leadIsRuby) {
@@ -291,7 +312,7 @@
         tail.appendChild(childNode);
         inserted.push(childNode);
       }
-      host.insertBefore(tail, leadIsRuby ? null : node.nextSibling);
+      host.insertBefore(tail, refNode);
       // 原文本节点（保留下来那条）的值也被我们改写过，同样算我们的
       if (!leadIsRuby) node.__ktOwned = true;
 
@@ -299,21 +320,15 @@
       // 注音节点清单，以及它原来插在哪个位置（host 的子节点下标）。
       // 记下标是为了让 kept=false 的形态能原样还原 —— 还原时我们插的节点
       // 会被逐个摘掉，届时再想找"插回哪儿"就已经晚了。
-      var index = 0;
-      var cn = host.childNodes;
-      for (var ci = 0; ci < cn.length; ci++) {
-        if (cn[ci] === node) {
-          index = ci;
-          break;
-        }
-      }
+      // 数值同样要在动 DOM 之前算：原节点摘掉之后遍历就再也找不到它，
+      // index 会留在 0，还原时把整段原文插到宿主行首。
       records.set(node, {
         host: host,
         nodes: inserted,
         plain: text,
         region: region,
         kept: !leadIsRuby,
-        index: index,
+        index: origIndex,
       });
       // 记下"这个 host 的这段内容已经注过音了"，两种可见形态都记，
       // 因为 React 丢掉我们插的节点前后，可见底字不一样。
@@ -343,20 +358,20 @@
       /*
        * 消费 jp-furigana 的「暂存」交接（见 tools/patch-jp-furigana.js）。
        *
-       * 它的 restore() 会把我们插在它 wrap 里的注音节点摘下来放到 host.__ktForeign，
-       * 等我们挂回原位。这里必须**取走并清空**：
-       *   - 取走：立刻把注音补回去，缩短可见的空窗（闪烁感主要来自这里）；
-       *   - 清空：否则它每次还原都再挂一次同一个节点，会越积越多。
+       * 它 restore() 时会把我们上一轮插进它 wrap 里的注音节点挂到 host.__ktForeign。
+       * 这些节点**只取走、不再挂回去**，两个原因：
+       *
+       *   1. 位置信息已经没了。它们属于一个刚被拆掉的 wrap，原来的邻居节点
+       *      大多已经不在了。以前这里是 `host.insertBefore(fnode, node.nextSibling)`，
+       *      而 node 是"这一轮碰巧处理到的文本节点"—— 行首片假名的注音会被挂到
+       *      行尾去，肉眼就是注音在行首/行尾来回横跳。
+       *   2. 不需要它们。那一段的原文一定还在 host.__fgOrig 里（wrap 之前的内容），
+       *      restore() 已经把它放回 DOM 了；而且下面紧接着就是正常注音流程，
+       *      会按当前 DOM 重新标一遍，位置自然是对的。挂回去只会多出一个重复注音。
+       *
+       * 清空是为了别把已经脱离文档的节点一直挂在 expando 上。
        */
-      var foreign = host.__ktForeign;
-      if (foreign && foreign.length) {
-        host.__ktForeign = null;
-        for (var fi = 0; fi < foreign.length; fi++) {
-          var fnode = foreign[fi];
-          if (!fnode || fnode.parentNode === host) continue; // 已经在原位
-          host.insertBefore(fnode, node.nextSibling);
-        }
-      }
+      if (host.__ktForeign) host.__ktForeign = null;
 
       if (!hasRubyLayout(doc) && host.setAttribute && !host.hasAttribute("data-kt-fallback")) {
         host.setAttribute("data-kt-fallback", "1");
