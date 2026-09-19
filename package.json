@@ -9,6 +9,7 @@
     "build:dict": "node tools/build-dict.js",
     "build:preview": "node tools/make-preview.js",
     "install:plugin": "node tools/build.js --install",
+    "verify:install": "node tools/verify-install.js",
     "patch:furigana": "node tools/patch-jp-furigana-plugin.js",
     "test": "node --test tests/matcher.test.js tests/annotate.test.js tests/coexist.test.js tests/patch.test.js tests/translate.test.js tests/integration.test.js",
     "test:serial": "node tests/matcher.test.js && node tests/annotate.test.js && node tests/coexist.test.js && node tests/patch.test.js && node tests/translate.test.js && node tests/integration.test.js",

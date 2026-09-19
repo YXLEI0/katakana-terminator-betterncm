@@ -242,6 +242,7 @@ npm install
 npm test              # 跑单元测试（node --test）
 npm run test:serial   # 逐个文件跑；受限环境里 node --test 起不了子进程时用这个
 npm run check         # 静态自检
+npm run verify:install  # 核对装到 C:\betterncm\plugins 的包与当前 src/ 是否逐字节一致
 node --use-system-ca tools/live-check.js   # 联网自测在线翻译（需要能访问 Google）
 ```
 

@@ -13,6 +13,14 @@
 改成链式：自己补完再调前一个；任一方抛异常都不拖累另一方。
 `tests/integration.test.js` 新增一条用例钉住它 —— 把 `main.js` 的改动撤掉它就变红。
 
+### 工具链
+
+- 新增 `tools/verify-install.js`（`npm run verify:install`）：把装到
+  `C:\betterncm\plugins` 的那个包解开，逐个文件和 `src/` 做**逐字节**比对，
+  顺带核对版本号、注入清单，以及两个共存关键串（认三家注音、钩子是链式）。
+  `.plugin` 是复制过去的，"改了代码但真机没变化"这种坑不用再靠猜。
+  姊妹插件 latin-katakana 里有同一份工具。
+
 ### 状态
 
 - `npm run test:serial` **93 个用例**全过（matcher 14 / annotate 22 / coexist 23 / patch 5 / translate 14 / integration 15）
