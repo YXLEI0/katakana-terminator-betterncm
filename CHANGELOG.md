@@ -1,5 +1,34 @@
 # 更新记录
 
+## 1.2.1
+
+修「补丁打了但没用」。
+
+原因很关键：**BetterNCM 每次启动都会把 `plugins/*.plugin` 重新解包到
+`plugins_runtime/<slug>/`**，所以我上一版改解包目录里的 `main.js` 在下次启动时
+被原封不动覆盖回去了（实测：改完是 53098 字节，重启后变回 63869 字节、
+时间戳回到原日期，补丁消失）。补丁必须打在**包本身**上才能持久。
+
+新增 `tools/patch-jp-furigana-plugin.js`：
+
+- 直接修改 `plugins/jp-furigana-*.plugin`（读取 zip → 替换 `main.js` → 重新打包）；
+- 支持 `--check` / `--revert` / `--file <路径>`；
+- 打补丁前做语法自检，语法不过就中止且不改文件；
+- 自动备份成 `<原名>.kt-bak`，只备份一次；
+- 自带 zip 读写往返自检（20 个条目、内容逐字节一致），
+  避免重新打包把词典文件弄坏。
+
+`tools/patch-jp-furigana.js`（改解包目录的那个）保留，适合临时试验；
+要持久请用新脚本。
+
+**操作步骤**（改包之后必须让解包目录重新生成）：
+
+```powershell
+node tools/patch-jp-furigana-plugin.js
+Remove-Item -Recurse -Force C:\betterncm\plugins_runtime\jp-furigana
+# 然后重启网易云
+```
+
 ## 1.2.0
 
 **支持「同一行歌词里，汉字有振假名 + 片假名有英文」。** 需要给 jp-furigana 打补丁。
