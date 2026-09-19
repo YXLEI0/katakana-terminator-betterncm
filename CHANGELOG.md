@@ -1,5 +1,51 @@
 # 更新记录
 
+## 1.2.2
+
+修「歌词行消失」——**这是我 1.2.0 补丁里的 bug，我造成的。**
+
+`restore()` 原本靠「host 为空」来决定是否放回原文字：
+
+```js
+if (!host.hasChildNodes() && host.__fgOrig && host.__fgOrig.length)
+    host.append(...host.__fgOrig);
+```
+
+而我的补丁先把外来注音 `appendChild` 到 host 上，host 就有子节点了，
+于是上面这个条件**永远不成立**，整行文字再也放不回来 —— 实测复现：
+
+```
+处理前:    取戻したい　ヒーローみたいに
+restore 后: 只剩 [我们的 ruby]，其余文字全没了
+原文本节点还在 p 里吗: false
+```
+
+**修法**：不再往 host 上挂节点，改成暂存到 host 的 expando（`host.__ktForeign`）：
+
+```js
+const __ktNodes = [...wrap.querySelectorAll('ruby.kt-ruby, .kt-ov-label')];
+if (__ktNodes.length) host.__ktForeign = __ktNodes;
+wrap.remove();        // 之后原有的 `if (!host.hasChildNodes() ...)` 依然成立
+```
+
+暂存后由片假名终结者自己接手，把节点挂回我们的原文本节点后面；
+也不会在宿主上残留任何 expando。
+
+修复前后对比（用真实函数实测）：
+
+| | `restore()` 后可见文字 |
+| --- | --- |
+| 旧补丁 | `"ヒーロー"`（其余全丢） |
+| 新补丁 | `"取戻したい　ヒーローみたいに"` ✅ |
+
+顺带加固工具链：
+
+- `revertPatch()` 改成按 `HELPER` 常量**精确移除**注入块（之前按行号找，留残渣），
+  并支持传入原始文本做逐字节校验；
+- `patch-jp-furigana-plugin.js` 新增 `--force`：以备份为基准重新打补丁，
+  避免在旧补丁上叠加；
+- `--revert` 优先用备份逐字节还原。
+
 ## 1.2.1
 
 修「补丁打了但没用」。

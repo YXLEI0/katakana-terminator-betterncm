@@ -84,12 +84,15 @@ const PATCHES = [
     to:
       "\t\t\t// " +
       MARK +
-      " wrap 里可能有别的插件插的注音节点，先搬到 host 上，\n" +
-      "\t\t\t// 否则会随 wrap 一起被丢掉（随后重建 wrap 时会被一起包进去）。\n" +
+      " wrap 里可能有别的插件（片假名终结者）插的注音节点。\n" +
+      "\t\t\t// 必须**暂存到 host 的 expando**，而不是 append 到 host 上：\n" +
+      "\t\t\t// 下面那句 `if (!host.hasChildNodes() && host.__fgOrig)` 靠「host 为空」\n" +
+      "\t\t\t// 决定是否放回原文字；一旦提前挂了节点，这个条件永远不成立，\n" +
+      "\t\t\t// 整行文字就再也放不回来 —— 实测会把歌词行清空。\n" +
+      "\t\t\t// 暂存后由片假名终结者自己接手，挂回我们的原文本节点后面。\n" +
       "\t\t\ttry {\n" +
-      "\t\t\t\tfor (const c of [...wrap.querySelectorAll('ruby.kt-ruby, .kt-ov-label')]) {\n" +
-      "\t\t\t\t\tif (c.parentNode) host.appendChild(c);\n" +
-      "\t\t\t\t}\n" +
+      "\t\t\t\tconst __ktNodes = [...wrap.querySelectorAll('ruby.kt-ruby, .kt-ov-label')];\n" +
+      "\t\t\t\tif (__ktNodes.length) host.__ktForeign = __ktNodes;\n" +
       "\t\t\t} catch (e) { /* ignore */ }\n" +
       "\t\t\twrap.remove();",
   },
@@ -126,27 +129,43 @@ function applyPatch(src) {
   return { src: out, applied };
 }
 
-/** 还原补丁（按标记回退），返回 { src, reverted[] } */
-function revertPatch(src) {
+/**
+ * 还原补丁，返回 { src, reverted[], exact? }。
+ *
+ * 还原要**逐字节回到原始**，不能只把两处替换退回去 —— 我注入的 helper 块
+ * 是一大段代码，靠"找标记删一段"很容易留下残渣（实测踩过：还原后仍含标记，
+ * 于是再次 --check 还是"已打补丁"）。
+ *
+ * 做法：把 helper 块从 HELPER 常量本身精确切掉（HELPER 是我自己写的，
+ * 内容完全确定），再退回两处替换，最后按可选的 origSrc 断言一致性。
+ */
+function revertPatch(src, origSrc) {
   if (!isPatched(src)) return { src, reverted: [], notPatched: true };
+
   let out = src;
   const reverted = [];
+
+  // 1. 两处替换，从后往前退（避免影响前面的匹配）
   for (const p of [...PATCHES].reverse()) {
     if (out.includes(p.to)) {
       out = out.replace(p.to, p.from);
       reverted.push(p.name);
     }
   }
-  // 去掉 helper 块
-  const hStart = out.indexOf("\n\t// " + MARK);
-  if (hStart >= 0) {
-    const hEnd = out.indexOf("function __ktOwnChildCount(el) {", hStart);
-    if (hEnd >= 0) {
-      const close = out.indexOf("\n\t}\n", hEnd);
-      if (close >= 0) out = out.slice(0, hStart) + out.slice(close + 4);
-    }
+
+  // 2. 精确移除 helper 块（按 HELPER 常量的原文匹配）
+  if (out.includes(HELPER)) {
+    out = out.split(HELPER).join("");
+    reverted.push("helper 块");
   }
-  return { src: out, reverted };
+
+  // 3. 如果给了原始文本，就用它兜底/校验
+  if (origSrc != null) {
+    if (out === origSrc) return { src: out, reverted, exact: true };
+    // 有备份就直接用备份，最可靠
+    return { src: origSrc, reverted, exact: true, usedBackup: true };
+  }
+  return { src: out, reverted, exact: false };
 }
 
 // ---------------------------------------------------------------- 命令行

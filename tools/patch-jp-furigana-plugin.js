@@ -141,6 +141,7 @@ function main() {
   const file = findPlugin(fi >= 0 ? args[fi + 1] : null);
   console.log("目标包: " + file);
 
+  const bak = file + ".kt-bak";
   const buf = fs.readFileSync(file);
   const entries = readZip(buf);
   const mainEntry = entries.find((e) => e.name === "main.js");
@@ -151,28 +152,52 @@ function main() {
 
   if (args.includes("--check")) {
     console.log(patchedNow ? "包内已打补丁" : "包内未打补丁");
+    console.log("备份存在: " + fs.existsSync(bak));
     return;
   }
 
   if (args.includes("--revert")) {
-    if (!patchedNow) {
+    if (fs.existsSync(bak)) {
+      // 有备份就直接用备份，逐字节还原，最可靠
+      const origEntries = readZip(fs.readFileSync(bak));
+      for (const e of entries) {
+        const o = origEntries.find((x) => x.name === e.name);
+        if (o) e.data = o.data;
+      }
+      fs.writeFileSync(file, buildZip(entries));
+      console.log("已按备份还原（逐字节）：" + file);
+    } else if (patchedNow) {
+      const r = revertPatch(src);
+      mainEntry.data = Buffer.from(r.src, "utf8");
+      fs.writeFileSync(file, buildZip(entries));
+      console.log("已还原（无备份，按标记回退）：" + file);
+    } else {
       console.log("包内没有补丁，无需还原。");
       return;
     }
-    const r = revertPatch(src);
-    mainEntry.data = Buffer.from(r.src, "utf8");
-    fs.writeFileSync(file, buildZip(entries));
-    console.log("已还原：" + file);
-    console.log("提示：还需要删除解包目录（plugins_runtime/jp-furigana）再启动，才会重新解包。");
+    console.log("提示：还需删除解包目录（plugins_runtime/jp-furigana）才会重新解包。");
     return;
   }
 
-  if (patchedNow) {
-    console.log("包内已经打过补丁了，无需重复。");
+  if (patchedNow && !args.includes("--force")) {
+    console.log("包内已经打过补丁了，无需重复。（要重打请加 --force）");
     return;
   }
 
-  const r = applyPatch(src);
+  // --force：以备份（原始版）为基准重新打，避免在旧补丁上叠加
+  let baseSrc = src;
+  if (patchedNow && args.includes("--force")) {
+    if (!fs.existsSync(bak)) {
+      console.error("包内已打补丁但没有备份，无法安全重打。请先恢复原始 .plugin。");
+      process.exit(4);
+    }
+    baseSrc = readZip(fs.readFileSync(bak))
+      .find((e) => e.name === "main.js")
+      .data.toString("utf8");
+    console.log("已用备份作为基准重新打补丁（长度 " + baseSrc.length + "）");
+  }
+
+  const r = applyPatch(baseSrc);
   if (r.error) {
     console.error("锚点没找到，可能 jp-furigana 版本变了：");
     for (const m of r.error) console.error("  - " + m);
@@ -187,7 +212,6 @@ function main() {
     process.exit(3);
   }
 
-  const bak = file + ".kt-bak";
   if (!fs.existsSync(bak)) {
     fs.copyFileSync(file, bak);
     console.log("已备份原包 -> " + path.basename(bak));
