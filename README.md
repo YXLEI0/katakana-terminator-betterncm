@@ -1,3 +1,5 @@
+# 该项目已暂停维护
+
 # 片假名终结者 · Katakana Terminator for BetterNCM
 
 在网易云音乐里，给**片假名外来语**上方标注**英文原词**
