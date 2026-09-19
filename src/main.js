@@ -25,16 +25,13 @@
   var DEFAULTS = {
     enabled: true,
     online: true, // 词典没有的词是否联网翻译
-    annotateAll: true, // 是否标播放栏的歌曲名/歌手（DOM 注音，稳定）
-    // 默认两种都标：歌词走浮层（不碰 DOM），播放栏走 DOM 注音。
-    // 歌词用浮层是因为 jp-furigana 这类插件会重建歌词行，往里插节点必被抹掉。
+    annotateAll: true, // 是否标播放栏的歌曲名/歌手
     scope: "all", // titles | lyrics | all | custom
     customSelector: "",
-    // 歌词用「直接写进歌词行」渲染：含汉字的行让给振假名插件，纯假名行归我们。
-    // 若给 jp-furigana 打了共存补丁（tools/patch-jp-furigana.js），
-    // 打开 coexistWithFurigana 就能在同一行上两种注音并存。
-    lyricRender: "inline",
-    coexistWithFurigana: false, // 需要先给 jp-furigana 打补丁，见设置面板说明
+    // 含汉字的歌词行默认让给振假名插件（jp-furigana），纯假名行归我们。
+    // 打了共存补丁（tools/patch-jp-furigana.js）后打开 coexistWithFurigana，
+    // 同一行上就能两种注音并存。
+    coexistWithFurigana: false,
     rtSize: 60, // 注音字号（相对底字百分比）
     rtOpacity: 80, // 注音不透明度
     focusDebug: false, // 给已注音区域描边，用来排障
@@ -108,7 +105,7 @@
   }
 
   // 改了默认值就 +1，用来把旧版本存下来的设置迁移掉
-  var CONFIG_VERSION = 3;
+  var CONFIG_VERSION = 4;
 
   function loadConfig() {
     var saved = {};
@@ -121,13 +118,11 @@
     for (var k in DEFAULTS) cfg[k] = DEFAULTS[k];
     for (var k2 in saved) if (k2 in DEFAULTS) cfg[k2] = saved[k2];
 
-    // v1 -> v2：歌词改为「按行分工」渲染。
-    // 旧配置里可能存着往歌词 DOM 插节点的组合，那会和振假名插件互相打架；
-    // 迁移时统一按新默认来（scope=all + lyricRender=inline），
-    // 冲突由"含汉字的行整个让给振假名插件"这条规则避免。
-    if (!(saved.configVersion >= 3)) {
+    // v1 -> v2：歌词改为「按行分工」——含汉字的行让给振假名插件，纯假名行归我们。
+    // 旧配置里可能存着别的插件版本遗留的组合，迁移时统一按新默认来，
+    // 冲突由分工规则 + 共存补丁避免。
+    if (!(saved.configVersion >= 4)) {
       cfg.scope = DEFAULTS.scope;
-      cfg.lyricRender = DEFAULTS.lyricRender;
     }
     cfg.configVersion = CONFIG_VERSION;
     return cfg;
@@ -172,7 +167,6 @@
   var state = {
     translator: null,
     annotator: null,
-    overlay: null,
     observer: null,
     timer: null,
     tickTimer: null,
@@ -197,36 +191,8 @@
 
   // ------------------------------------------------------------ 扫描
 
-  /**
-   * 歌词是不是该用浮层渲染。
-   * 浮层完全不碰歌词 DOM，所以能和安全第一的插件（jp-furigana）共存。
-   */
-  function useOverlayForLyrics() {
-    return (
-      config.lyricRender !== "inline" &&
-      !!state.overlay &&
-      (config.scope === "lyrics" || config.scope === "all")
-    );
-  }
-
-  /** 取出歌词区域（只用来量位置，浮层不改它们） */
-  function lyricRegions() {
-    if (!state.annotator) return [];
-    if (config.scope === "custom" && config.customSelector) {
-      var custom = state.annotator.customRegions(config.customSelector);
-      if (custom.length) return custom;
-    }
-    return state.annotator.findRegions("lyrics");
-  }
-
   function buildRegions() {
     if (!state.annotator) return [];
-
-    // 歌词走浮层：DOM 注音这一路一个歌词元素都不要碰
-    if (useOverlayForLyrics()) {
-      return config.annotateAll === false ? [] : state.annotator.findRegions("titles");
-    }
-
     // 自定义选择器优先；匹配不到就退回下面的模式
     if (config.scope === "custom" && config.customSelector) {
       var custom = state.annotator.customRegions(config.customSelector);
@@ -237,20 +203,10 @@
     if (config.scope === "titles") {
       return config.annotateAll === false ? [] : state.annotator.findRegions("titles");
     }
-    // 只标歌词（inline 渲染）
+    // 只标歌词
     if (config.scope === "lyrics") return state.annotator.findRegions("lyrics");
-    // 全都标（inline 渲染）
+    // 歌词 + 播放栏
     return state.annotator.findRegions("safe");
-  }
-
-  /** 浮层的可见性跟着设置走 */
-  function syncOverlay() {
-    if (!state.overlay) return;
-    if (!config.enabled || !useOverlayForLyrics()) {
-      state.overlay.stop();
-      return;
-    }
-    state.overlay.start(lyricRegions);
   }
 
   function pass() {
@@ -360,7 +316,6 @@
       state.applied = true;
       startObserver();
     }
-    syncOverlay();
     schedule(0);
   }
 
@@ -371,13 +326,11 @@
       state.timer = null;
     }
     if (state.annotator) state.annotator.restoreAll();
-    if (state.overlay) state.overlay.stop();
   }
 
   function rescan() {
     if (state.annotator) state.annotator.restoreAll();
     if (state.translator) state.translator.retryMisses();
-    syncOverlay();
     schedule(0);
   }
 
@@ -424,20 +377,13 @@
       '<div class="kt-row"><label>注音不透明度 <input type="range" data-k="rtOpacity" min="10" max="100" step="1"> <span data-v="rtOpacity"></span></label></div>' +
       "<h3>范围</h3>" +
       '<div class="kt-row"><label>标注范围 <select data-k="scope">' +
-      '<option value="titles">只标播放栏的歌曲名 / 歌手（最稳，默认）</option>' +
+      '<option value="titles">只标播放栏的歌曲名 / 歌手</option>' +
       '<option value="lyrics">只标歌词</option>' +
-      '<option value="all">歌词 + 播放栏</option>' +
+      '<option value="all">歌词 + 播放栏（默认）</option>' +
       '<option value="custom">自定义选择器</option>' +
       "</select></label></div>" +
-      '<div class="kt-hint">歌词行的 DOM 会被网易云和别的歌词插件高频重建，注音可能被反复丢掉。' +
-      "插件会自动放弃「一直在变」的行（宁可少标也不闪）。如果你发现歌词抽搐，就是这个原因——" +
-      "把它切回「只标播放栏」即可。</div>" +
-      '<div class="kt-row"><label>歌词渲染方式 <select data-k="lyricRender">' +
-      '<option value="overlay">浮层（推荐，不碰歌词 DOM，可与振假名插件共存）</option>' +
-      '<option value="inline">直接写进歌词行（排版更准，但会和振假名插件互相打架）</option>' +
-      "</select></label></div>" +
-      '<div class="kt-hint">「浮层」把英文画在歌词上方，歌词 DOM 一个字节都不改，' +
-      "所以 jp-furigana 这类会重建歌词行的插件不会把它抹掉；代价是注音不参与排版（换行/缩放时可能略有偏差）。</div>" +
+      '<div class="kt-hint">歌词行会被网易云和别的歌词插件高频重建，注音可能被反复丢掉。' +
+      "插件会自动放弃「一直在变」的行（宁可少标也不闪）。如果歌词抽搐，把它切回「只标播放栏」即可。</div>" +
       '<div class="kt-row"><label><input type="checkbox" data-k="coexistWithFurigana"> ' +
       "与振假名插件共用同一行（需先给 jp-furigana 打补丁）</label></div>" +
       '<div class="kt-hint">默认情况下含汉字的歌词行整个让给 jp-furigana，' +
@@ -510,11 +456,6 @@
       lines.push("BetterNCM: " + (state.betterncmVersion || "未知"));
       lines.push("离线词典: " + (typeof KTDict !== "undefined" ? KTDict.count : "未加载") + " 条");
       lines.push("已注音节点: " + (state.annotator ? state.annotator.injectedCount() : 0));
-      if (state.overlay) {
-        lines.push(
-          "浮层: " + (state.overlay.isRunning() ? "运行中" : "未启用") + "，标签 " + state.overlay.labelCount() + " 个"
-        );
-      }
       lines.push("上一轮: " + state.lastPassMs + "ms " + JSON.stringify(state.lastResult || {}));
       if (s) {
         lines.push(
@@ -537,7 +478,7 @@
       if (status) status.style.display = "none";
     }
 
-    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector", "lyricRender", "coexistWithFurigana"];
+    var NEEDS_RESCAN = ["annotateAll", "scope", "customSelector", "coexistWithFurigana"];
     var NEEDS_RESTYLE = ["rtSize", "rtOpacity", "focusDebug"];
 
     var inputs = root.querySelectorAll("[data-k]");
@@ -738,12 +679,10 @@
           return state.translator.lookup(word);
         },
         annotateAll: config.annotateAll !== false,
-        // 直接把注音写进歌词行时，含汉字的行要整体让给振假名插件（jp-furigana），
-        // 否则两边会来回重建同一行。用浮层时不改 DOM，就没有这个必要。
-        // 这里传函数：设置随时可能变，必须每次扫描时重新判断。
-        skipKanjiLines: function () {
-          return !useOverlayForLyrics();
-        },
+        // 含汉字的歌词行默认让给振假名插件（jp-furigana）：两边都往同一行插节点
+        // 会互相重建，来回闪烁。纯假名行没有振假名可注，本来就没有冲突。
+        // 打了共存补丁后打开 coexistWithFurigana，同一行上两种注音才能并存。
+        skipKanjiLines: true,
         // 打了共存补丁后才允许在含汉字的行上也注音（两种注音同一行）
         coexistWithFurigana: !!config.coexistWithFurigana,
         log: function () {
@@ -751,19 +690,6 @@
           trace("annotate", Array.prototype.join.call(arguments, " "));
         },
       });
-      // 歌词用的浮层渲染器：不碰歌词 DOM，因此能和 jp-furigana 共存
-      if (typeof KTOverlay !== "undefined" && KTOverlay.createOverlay) {
-        state.overlay = KTOverlay.createOverlay({
-          lookup: function (word) {
-            return state.translator.lookup(word);
-          },
-          rtSize: config.rtSize,
-          rtOpacity: config.rtOpacity,
-          log: function () {
-            trace("overlay", Array.prototype.join.call(arguments, " "));
-          },
-        });
-      }
     } catch (e) {
       state.error = (e && e.message) || String(e);
       warn("初始化失败", e);
@@ -808,11 +734,6 @@
       },
       rubyLayout: function () {
         return KTAnnotate.hasRubyLayout(document);
-      },
-      overlay: function () {
-        return state.overlay
-          ? { running: state.overlay.isRunning(), labels: state.overlay.labelCount() }
-          : null;
       },
     };
 

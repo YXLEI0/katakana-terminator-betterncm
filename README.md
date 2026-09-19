@@ -53,10 +53,30 @@ npm run install:plugin              # 顺便复制到 C:\betterncm\plugins
 | 除歌词外也标注标题 / 歌手 / 专辑 | 关掉就只处理歌词区域 |
 | 注音字号 | 注音相对底字的百分比，默认 60% |
 | 注音不透明度 | 默认 80% |
-| 标注范围 | 自动 / 只标歌词 / 自定义选择器 |
+| 标注范围 | 歌词 + 播放栏 / 只标歌词 / 只标播放栏 / 自定义选择器 |
+| 与振假名插件共用同一行 | 打开后含汉字的歌词行也标英文（需先给 jp-furigana 打补丁，见下） |
 | 重新扫描 | 立刻重扫一遍当前页面 |
 | 重试未翻译的词 | 清掉「查不到」的记录重新排队（接口恢复后用） |
 | 清除翻译缓存 | 清空本地翻译缓存 |
+
+## 和 jp-furigana 共存
+
+[jp-furigana](https://github.com/Leleawa/jp-furigana) 给汉字标振假名，本插件给片假名标英文，
+两者都想往同一行歌词里插节点，所以默认**按行分工**：
+
+- **纯假名行**（没有汉字）归本插件——jp-furigana 本来就不处理这种行；
+- **含汉字的行**整个让给 jp-furigana，本插件一个字都不碰。
+
+想在一行里同时看到两种注音，就得给 jp-furigana 打补丁，让它允许外来节点存在：
+
+```bash
+npm run patch:furigana -- --file "C:\betterncm\plugins\jp-furigana-1.1.0.plugin"
+```
+
+补丁直接改 `.plugin` 包（会先存一份 `.kt-bak` 备份），改完重启网易云生效；
+然后在设置里打开「与振假名插件共用同一行」。撤销用 `--revert`，查看状态用 `--check`。
+
+不打补丁也能用，只是含汉字的行看不到英文注音。
 
 ## 翻译从哪来
 
@@ -143,6 +163,9 @@ tools/
   make-preview.js     生成预览图
   check.js            静态自检（语法/manifest/词典/密钥）
   live-check.js       联网自测在线翻译接口
+  patch-jp-furigana.js         共存补丁本体（改 jp-furigana 的 main.js）
+  patch-jp-furigana-plugin.js  把补丁打进 .plugin 包（持久化，备份 .kt-bak）
+  read-trace.js       从网易云的 Local Storage 里读插件运行轨迹
 ```
 
 ## 开发
@@ -179,7 +202,9 @@ npm run build:dict
 
 - **桌面歌词不生效。** 那是原生窗口，不是网页，插件技术上够不到。
 - 单片假名词不注（「ア」这种），除非它正好在词典里。
-- 只处理假名，汉字振假名是另一个插件（jp-furigana）的活。
+- 只处理假名，汉字振假名是另一个插件（jp-furigana）的活。含汉字的**歌词行**
+  默认整个让给 jp-furigana（详见上面「和 jp-furigana 共存」）；
+  播放栏的歌名/歌手不归它管，含汉字也照标。
 - 在线翻译依赖 Google 的**非公开**接口，可能失效或被限流；失效时自动退回离线词典。
 
 ## 许可

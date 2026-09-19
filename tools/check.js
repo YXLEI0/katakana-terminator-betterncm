@@ -87,7 +87,7 @@ console.log("[0/7] 运行时版本");
   const TEST_FILES = [
     "tests/matcher.test.js",
     "tests/annotate.test.js",
-    "tests/overlay.test.js",
+    "tests/coexist.test.js",
     "tests/translate.test.js",
     "tests/integration.test.js",
   ];
@@ -157,7 +157,6 @@ const WANT_ORDER = [
   "core/dict.js",
   "core/translate.js",
   "core/annotate.js",
-  "core/overlay.js",
   "main.js",
 ];
 if (manifest && manifest.injects && manifest.injects.Main) {
