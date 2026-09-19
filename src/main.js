@@ -456,6 +456,11 @@
       lines.push("BetterNCM: " + (state.betterncmVersion || "未知"));
       lines.push("离线词典: " + (typeof KTDict !== "undefined" ? KTDict.count : "未加载") + " 条");
       lines.push("已注音节点: " + (state.annotator ? state.annotator.injectedCount() : 0));
+      if (state.annotator && state.annotator.churnedCount && state.annotator.churnedCount() > 0) {
+        // 这些行是插件主动放弃的（对方插件在反复重建这一行，追着重注就是闪）。
+        // 明确写出来，免得看起来像"漏标了"。
+        lines.push("已避让: " + state.annotator.churnedCount() + " 行（对方反复重建，见轨迹里的 churn）");
+      }
       lines.push("上一轮: " + state.lastPassMs + "ms " + JSON.stringify(state.lastResult || {}));
       if (s) {
         lines.push(

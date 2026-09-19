@@ -159,8 +159,20 @@
     var churnByText = new Map(); // 文本 -> { count, since, strikes }
     var churnUntil = new Map(); // 文本 -> 退避截止时间戳
     var CHURN_WINDOW_MS = 4000; // 计数窗口
-    var CHURN_LIMIT = 4; // 窗口内超过这个次数就认输
-    var CHURN_BASE_MS = 15000; // 第一次退避
+    /*
+     * 阈值给 2，不给 4：真机上"宿主整个被删掉重建"的行一秒内能重建好几轮，
+     * 每多给一轮就多闪一次。2.0.2 的实测轨迹：
+     *   :29:14 [pass] changed=10 restored=0 unstable=8
+     *   :29:14 [pass] changed=10 restored=10      ← 同一批行第二轮
+     *   :29:15 churn 放弃这一行 ...
+     * 打满 4 轮就是闪 4 次。给 2 = "试一次，不行就认输"。
+     */
+    var CHURN_LIMIT = 2;
+    /*
+     * 首次退避 60s（原来 15s）：15s 的话一首歌里会反复"闪一下、停、又闪一下"。
+     * 退避本身按 4 倍递增，多来几次就涨到 4min / 10min。
+     */
+    var CHURN_BASE_MS = 60000; // 第一次退避
     var CHURN_MAX_MS = 600000; // 退避上限
     var CHURN_MAX_ENTRIES = 200; // 兜底：别让 Map 无限长
 
@@ -192,7 +204,7 @@
     }
 
     /** 记一次"文本没变但注音失效"；到达阈值就进入退避 */
-    function noteChurn(text) {
+    function noteChurn(text, where) {
       if (!text) return;
       var now = Date.now();
       var c = churnByText.get(text);
@@ -210,7 +222,9 @@
         options.log(
           "churn 放弃这一行 " +
             Math.round(wait / 1000) +
-            "s（文本没变却反复失效，八成是对方插件在无条件重建）文本=" +
+            "s（注音反复被重建掉" +
+            (where ? "，宿主 " + where : "") +
+            "）文本=" +
             JSON.stringify(String(text).slice(0, 40))
         );
       }
@@ -421,17 +435,11 @@
       });
 
       if (options.log && records.size <= 40) {
-        // 记下区域的身份：真机排障时，光看文字分不清是歌词还是标题，
-        // 必须能看出命中的是哪些 class。
+        // 记下区域和宿主的身份。真机排障时最关键的就是这个 host：
+        // 它是 jp-furigana 的 wrap（fg-line）、RNP 的逐字 span（rnp-*），
+        // 还是整行 div —— 决定了我们的注音会不会被对方重建掉。
         options.log(
-          "已注音 region=" +
-            (region.tagName || "?") +
-            "." +
-            String(region.className || "").split(" ").slice(0, 2).join(".") +
-            " host=" +
-            (host.tagName || "?") +
-            " 文本=" +
-            JSON.stringify(text.slice(0, 30))
+          "已注音 region=" + idOf(region) + " host=" + idOf(host) + " 文本=" + JSON.stringify(text.slice(0, 30))
         );
       }
 
@@ -673,10 +681,9 @@
           if (n.parentNode) n.parentNode.removeChild(n);
         }
         // 宿主整个被摘掉 = 我们刚注的那段文字连同容器一起被对方丢弃了。
-        // 这正是"对方在无条件重建这一行"的表现，计入 churn。
-        // （真机案例：没打补丁的 jp-furigana 每次重建都新建一个 wrap span，
-        //  我们的 rec.host 就是它，于是每轮都走这里 —— changed=18 restored=18。）
-        noteChurn(rec.plain);
+        // 真机轨迹里 restored 全部来自这里（一条"失效[...]"都没有），
+        // 说明闪烁的形态就是"宿主被反复删掉重建"，而不是判定逻辑出错。
+        noteChurn(rec.plain, idOf(rec.host));
         records.delete(dead[i]);
       }
       return dead.length;
@@ -752,6 +759,23 @@
           " kept=" +
           !!rec.kept
       );
+    }
+
+    /**
+     * 元素的简短身份（tag + 前两个 class），写进轨迹用。
+     *
+     * 排障时最要紧的就是**宿主到底是谁**：jp-furigana 的 wrap（fg-line）、
+     * RNP 的逐字 span（rnp-karaoke-word）、还是整行 div —— 我们的注音
+     * 稳不稳，全看这个宿主会不会被对方重建。
+     */
+    function idOf(el) {
+      if (!el || el.nodeType !== 1) return "?";
+      var c = String(el.className || "")
+        .split(" ")
+        .filter(Boolean)
+        .slice(0, 2)
+        .join(".");
+      return (el.tagName || "?") + (c ? "." + c : "");
     }
 
     /**
@@ -994,7 +1018,7 @@
           // 文本一模一样却判定失效 —— 这是"对方在无条件重建这一行"的特征。
           // 注意要在 restore / 删记录**之前**判断：restoreRecord 会把原文写回去，
           // 之后就分不清到底是"文本变了"还是"文本没变"了。
-          if (rec.plain != null) noteChurn(rec.plain);
+          if (rec.plain != null) noteChurn(rec.plain, idOf(rec.host));
           if (annotationsIntact(rec)) {
             restoreRecord(node, rec);
             restored++;
@@ -1057,12 +1081,18 @@
       return records.size;
     }
 
+    /** 当前处于"认输期"的行数 —— 这些行是**故意**不注音的，不是漏了 */
+    function churnedCount() {
+      return churnUntil.size;
+    }
+
     return {
       pass: pass,
       restoreAll: restoreAll,
       findRegions: findRegions,
       customRegions: customRegions,
       injectedCount: injectedCount,
+      churnedCount: churnedCount,
       cleanup: cleanup,
     };
   }

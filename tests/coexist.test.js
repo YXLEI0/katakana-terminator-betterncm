@@ -345,13 +345,19 @@ test("对手无条件重建时，插件会认输停手，而不是无限对打",
   // 前几轮：对方重建 → 我们的宿主（它那个 wrap span）整个没了 → 我们重注 → 它又重建……
   fgApplyWrap(doc, p, SEGMENTS);
   let fought = 0;
-  for (let i = 0; i < 6; i++) {
+  let roundsWithChange = 0;
+  for (let i = 0; i < 10; i++) {
     const r = ann.pass();
+    if (r.changed > 0) roundsWithChange++;
     fought += r.changed + r.restored;
     fgRestoreUnpatched(p);
     fgApplyWrap(doc, p, SEGMENTS);
   }
-  assert.ok(fought >= 6, "前提：这个对手确实在和我们反复对打（changed+restored=" + fought + "）");
+  assert.ok(fought >= 3, "前提：这个对手确实在和我们反复对打（changed+restored=" + fought + "）");
+  assert.ok(
+    roundsWithChange <= 2,
+    "认输必须在两轮内生效，否则用户看到的就是连闪 —— 实际有 " + roundsWithChange + " 轮在改 DOM"
+  );
   assert.ok(
     logs.some((l) => l.indexOf("churn 放弃这一行") === 0),
     "对打到阈值后应该主动认输，并留下轨迹：" + JSON.stringify(logs.slice(-3))
