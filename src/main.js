@@ -754,13 +754,34 @@
      * 钩子：装了共存补丁的 jp-furigana 重建完一行后会**直接叫我们**，
      * 让我们在同一个任务里把注音补回新 wrap —— 等下一帧就是肉眼可见的一闪。
      * 真机轨迹：`changed=1 restored=1` 每秒五次、永不停止，就是缺这个同步补。
+     *
+     * 这里**必须链上去而不是覆盖**：同名钩子是全局的，装了「拉丁字母片假名注音」
+     * （或以后任何一个注音插件）时它可能已经挂过一个。直接赋值会把它顶掉，
+     * 那边立刻开始闪 —— 而且是"只有它一家闪"，查起来极费劲。
+     * 谁先加载不该决定谁的功能还在，所以两个方向都得能链。
      */
     try {
+      var prevHook = typeof window.__ktRepairLine === "function" ? window.__ktRepairLine : null;
       window.__ktRepairLine = function (lineEl) {
-        if (!config.enabled || !state.annotator || !state.annotator.repairLine) return false;
-        // 顺手把观测队列清掉：这一轮的变更全是我们自己造成的，不必再排一次 pass
-        if (state.observer) state.observer.takeRecords();
-        return state.annotator.repairLine(lineEl);
+        var mine = false;
+        try {
+          if (config.enabled && state.annotator && state.annotator.repairLine) {
+            // 顺手把观测队列清掉：这一轮的变更全是我们自己造成的，不必再排一次 pass
+            if (state.observer) state.observer.takeRecords();
+            mine = state.annotator.repairLine(lineEl);
+          }
+        } catch (e) {
+          /* 我们这边出错也不能拖累对方 */
+        }
+        // 再去叫前一个（可能是「拉丁字母片假名注音」）
+        if (prevHook) {
+          try {
+            prevHook(lineEl);
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        return mine;
       };
     } catch (e) {
       /* 挂不上就算了，还有 MutationObserver 那条路 */

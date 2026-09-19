@@ -323,6 +323,32 @@ test("对方重建完一行直接叫我们时，注音要在同一次调用里�
   assert.strictEqual(baseText(p), "ギターとピアノのセッション", "底字必须保持原文");
 });
 
+test("钩子要链上去：不能把已经挂着的（拉丁字母片假名注音）顶掉", async () => {
+  // window.__ktRepairLine 是全局的。谁先加载不该决定谁的功能还在：
+  // 如果后加载的那个直接赋值，先加载的那家就再也收不到同步通知，
+  // 于是它开始闪 —— 而且是"只有它一家闪"，非常难查。两个方向都必须能链。
+  const env = bootPlugin(NCM_HTML);
+  const called = [];
+  env.window.__ktRepairLine = function () {
+    called.push("prev");
+  };
+  await env.runLoad();
+  await sleep(600);
+
+  const li = env.document.querySelectorAll("ul.lyric li")[1];
+  const p = li.querySelector("p");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "前提：先注上音");
+
+  // 模拟对方重建这一行
+  while (p.firstChild) p.removeChild(p.firstChild);
+  p.appendChild(env.document.createTextNode("ギターとピアノのセッション"));
+
+  const ok = env.window.__ktRepairLine(li);
+  assert.strictEqual(ok, true, "自己该补的还是要补");
+  assert.ok(p.querySelectorAll("ruby.kt-ruby").length >= 1, "注音要就位");
+  assert.ok(called.indexOf("prev") >= 0, "前一个钩子也必须被调到（否则那一家会闪）");
+});
+
 test("设置面板能构建出来，控件反映当前配置，链接交给系统浏览器", () => {
   const env = bootPlugin(NCM_HTML);
   const root = env.listeners.config[0]();
