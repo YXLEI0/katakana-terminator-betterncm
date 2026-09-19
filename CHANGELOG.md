@@ -1,5 +1,58 @@
 # 更新记录
 
+## 2.0.8
+
+**根治了「ジオラマ一直闪」—— 补丁加了第四条，改的是 jp-furigana 的 `hostsText()`。**
+
+### 根因
+
+它判断"这一行还能用吗"靠这一条：
+
+```js
+return hostsText(line) === line.__fgText;
+```
+
+但两边的**算法不一致**：
+
+| | 怎么算 | 算不算注音 |
+| --- | --- | --- |
+| `line.__fgText` | `plainText(line)` | 排除 `<rt>`/`<rp>`/`.fg-rt` |
+| `hostsText(line)` | `Σ host.__fgOrig[].textContent` | **什么都算** |
+
+只要我们的 `<ruby>` 在它 `applyWrap()` 之前就已经是宿主的子节点，它就会连我们的
+ruby 一起存进 `__fgOrig`，于是 `hostsText` 里多出 rt 里的英文（`ステージstage`），
+两边**永远**对不上 → `isClean()` 永远 false → 它每一轮 pass 都重建这一行 →
+我们的注音每轮被抹掉 → 一直闪。
+
+真机上什么时候会"我们比它先动手"？RNP 把当前唱到的那段换成纯文本、它的 wrap
+那一瞬间不在了，我们正好补上注音。**而会闪的那几个词（ジオラマ、ライト）
+恰好都不在离线词典里** —— 它们的注音是联网译文回来后补的，时机正好撞上。
+
+### 复现与验证
+
+`kt-work/tools/repro-orig-pollution.js` 用真实的 `annotate.js` + 照抄的
+`applyWrap`/`restore`/`hostsText`/`plainText`/`isClean` 跑 6 轮：
+
+| `hostsText` 口径 | 对端每轮重建次数 | 结果 |
+| --- | --- | --- |
+| `textContent`（现状） | `[1,1,1,1,1,1]` | `isClean` 永远 false，无限重建 |
+| `plainText(n)`（我一开始想的天真修法） | `[1,1,1,...]` | **不行** —— TreeWalker 的 `nextNode()` 不访问根节点，传文本节点进去返回空串，会把正文丢掉 |
+| 分三种情况（最终方案） | `[1,0,0,0,0,0]` | wrap 一次之后 `isClean` 恒为真，稳定 |
+
+最终方案：文本节点取 `nodeValue`；外来注音（`kt-ruby`）只取它的底字、不要 rt；
+其余元素走 `plainText`。
+
+### 新增补丁工具的自检
+
+`tests/patch.test.js`（5 个用例）用一段照抄真实源码的样本固定住**四处锚点**，
+并断言：四处都能应用、打完补丁的代码语法正确、重复打是幂等的、
+`--revert` 能逐字节还原、锚点缺失时中止且不改内容。
+以后 jp-furigana 升级导致锚点失效，会在 CI 里直接红，而不是等用户发现闪。
+
+> **需要重新打一次补丁**：`npm run patch:furigana -- --force`
+> （`--force` 会以原始备份为基准重打，避免在旧补丁上叠加）。已替你执行完，
+> 并确认包内四条补丁齐全、`main.js` 语法正确。
+
 ## 2.0.7
 
 修上一版加的诊断（**只改诊断，不改行为**）。

@@ -88,6 +88,7 @@ console.log("[0/7] 运行时版本");
     "tests/matcher.test.js",
     "tests/annotate.test.js",
     "tests/coexist.test.js",
+    "tests/patch.test.js",
     "tests/translate.test.js",
     "tests/integration.test.js",
   ];

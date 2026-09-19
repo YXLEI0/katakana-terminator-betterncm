@@ -152,6 +152,45 @@ const PATCHES = [
       "\t\t\t\tif (__ktRecordIsOurs(r)) continue;\n" +
       "\t\t\t\trelevant = true;",
   },
+  {
+    /*
+     * 第四条：hostsText() 的口径。
+     *
+     * 它判断"这一行还能用吗"靠 hostsText(line) === line.__fgText，但两边算法不一致：
+     *   __fgText  = plainText(line)                 —— 排除 <rt>/<rp>/.fg-rt
+     *   hostsText = Σ host.__fgOrig[].textContent    —— 什么都算
+     *
+     * 只要我们的 <ruby> 在它 applyWrap 之前就已经是宿主的子节点，它就会把我们的
+     * ruby 一起存进 __fgOrig，于是 hostsText 里多出 rt 里的英文（"ステージstage"），
+     * 两边**永远**对不上 → isClean() 永远 false → 它每一轮 pass 都重建这一行 →
+     * 我们的注音每轮被抹掉 → 一直闪。
+     *
+     * 真机证据：只有联网翻译出来的那几个词（ジオラマ、ライト 不在离线词典里）
+     * 会闪 —— 它们的注音是在"它的 wrap 已经不在了"的那一瞬间补上去的，
+     * 正好构成"我们比它先动手"，于是 ruby 被它存进 __fgOrig。
+     * 用工具里的 repro 可以稳定复现：重建次数 [1,1,1,1,1,1]；打上本条后变成
+     * [1,0,0,0,0,0]（wrap 一次之后 isClean 恒为真）。
+     *
+     * 为什么不能简单换成 plainText(n)：plainText 用 TreeWalker，而 nextNode()
+     * 不访问根节点 —— 传文本节点进去返回空字符串，会把正文整段丢掉。
+     * 所以分三种情况：文本节点取值、外来注音只取底字、其余元素走 plainText。
+     */
+    name: "hostsText: 只数「看得见的底字」，别把外来注音的 rt 算进原文",
+    from: "\t\t\tfor (const n of h.__fgOrig || []) out += n.textContent;",
+    to:
+      "\t\t\t// " +
+      MARK +
+      " 只数看得见的底字，别把外来注音 rt 里的英文算成原文：\n" +
+      "\t\t\t// 否则 hostsText(line) !== line.__fgText 永远成立，这一行会被无限重建。\n" +
+      "\t\t\tfor (const n of h.__fgOrig || []) {\n" +
+      "\t\t\t\tif (n.nodeType === 3) { out += n.nodeValue; continue; }\n" +
+      "\t\t\t\tif (__ktIsForeign(n)) {\n" +
+      "\t\t\t\t\tfor (const c of n.childNodes) if (c.nodeType === 3) out += c.nodeValue;\n" +
+      "\t\t\t\t\tcontinue;\n" +
+      "\t\t\t\t}\n" +
+      "\t\t\t\tout += plainText(n);\n" +
+      "\t\t\t}",
+  },
 ];
 
 // ---------------------------------------------------------------- 纯函数
